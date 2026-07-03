@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { fail } from "./errors";
 
@@ -14,9 +15,15 @@ export function resolvePath(cwd: string, path: string, label: string): string {
 
   const root = resolve(cwd);
   const resolved = resolve(root, path);
+  const realRoot = realpathSync(root);
 
   if (!isInside(root, resolved)) {
     fail("path_outside_cwd", `${label} escapes the working directory: ${path}`, { path, phase: "path" });
+  }
+
+  const realResolved = realpathSync(resolved);
+  if (!isInside(realRoot, realResolved)) {
+    fail("path_outside_cwd", `${label} resolves outside the working directory: ${path}`, { path, phase: "path" });
   }
 
   return resolved;

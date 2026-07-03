@@ -48,7 +48,7 @@ blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-
 
 `check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing. `-R`/`--reverse` moves the verified payload back from the target location to the source location; it works with both `check` and `apply`.
 
-Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths and `..` escapes are rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
+Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths and `..` escapes are rejected. Existing operation paths are also resolved through symlinks; if the real path escapes `--cwd`, the operation is rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
 
 `apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Because patch headers require `a/` and `b/` prefixes, the default is equivalent to `-p1`.
 
@@ -296,7 +296,7 @@ If the source full match is absent, `blockpatch` checks for an exact already-app
 
 With `-R`/`--reverse`, `blockpatch` applies the same exact model in the opposite direction: it locates `target context before + payload + target context after`, removes the verified payload from there, then inserts it between `source context before` and `source context after`. Reverse application is exact and non-fuzzy. A payload-only source hunk has no source-side anchor for reverse insertion, so reverse requires source context before or after.
 
-Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files and stage all changed temp files before renaming any original. If staging fails, originals are left untouched. Once renames begin, the two-file operation is still not transactional; the destination is renamed before the source so an interruption can duplicate the payload, but should not delete it from both files.
+Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files and stage all changed temp files before renaming any original. If staging fails, originals are left untouched. Once renames begin, the two-file operation is still not transactional; the destination is renamed before the source so an interruption can duplicate the payload, but should not delete it from both files. Atomic here means per-file replacement, not a crash-durable multi-file transaction.
 
 ## Failure Rules
 

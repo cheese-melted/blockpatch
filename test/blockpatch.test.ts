@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -40,6 +40,22 @@ async function expectFixtureFailure(name: string, message: string): Promise<void
 describe("blockpatch golden fixtures", () => {
   test("successful move", async () => {
     await expectFixtureApply("success");
+  });
+
+  test("applying the same patch twice reports already_applied", async () => {
+    const cwd = await fixtureCase("success");
+    await applyPatchFile("patch.blockpatch", { cwd });
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.changed).toEqual([]);
+    expect(result.affected).toEqual(["file.txt"]);
+    expect(result.noop).toBe(true);
+    expect(result.status).toBe("already_applied");
+    expect(result.moves[0]).toMatchObject({
+      src: "file.txt",
+      dst: "file.txt",
+      source_range: null
+    });
   });
 
   test("ambiguous source", async () => {
@@ -911,6 +927,43 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
+  test("move --json expected_payload_sha256 catches a generic src_end selecting a shorter block", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-wrong-delimiter-"));
+    const fullPayload = "function movedThing() {\n  if (ready) {\n    return 42;\n  }\n}\n";
+    const shortPayload = "function movedThing() {\n  if (ready) {\n    return 42;\n  }\n";
+    const fullPayloadSha256 = createHash("sha256").update(fullPayload).digest("hex");
+    await writeFile(join(cwd, "source.ts"), `alpha\n${fullPayload}omega\nclass Target {\n}\n`);
+
+    const loose = await moveBlock(
+      {
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n"
+      },
+      { cwd, dryRun: true }
+    );
+    expect(loose.moves[0]).toMatchObject({
+      payload_sha256: createHash("sha256").update(shortPayload).digest("hex"),
+      payload_bytes: shortPayload.length
+    });
+    expect(loose.moves[0].payload_sha256).not.toBe(fullPayloadSha256);
+
+    await expect(
+      moveBlock(
+        {
+          src: "source.ts",
+          src_start: "function movedThing() {\n",
+          src_end: "}\n",
+          target_before: "class Target {\n",
+          expected_payload_sha256: fullPayloadSha256
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("expected_payload_sha256 does not match selected source payload");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(`alpha\n${fullPayload}omega\nclass Target {\n}\n`);
+  });
+
   test("move --json path supports dry-run", async () => {
     const cwd = await moveFixture();
     const before = await readFile(join(cwd, "source.ts"), "utf8");
@@ -1654,6 +1707,37 @@ describe("format hardening", () => {
     expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
   });
 
+  test("patch paths may not escape the working directory through a symlink", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-symlink-escape-"));
+    const cwd = join(parent, "repo");
+    await mkdir(cwd);
+    await writeFile(join(parent, "outside.txt"), "safe\nmove me\nomega\nanchor\n");
+    try {
+      await symlink(join(parent, "outside.txt"), join(cwd, "link.txt"));
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code === "EPERM" || code === "EACCES" || code === "ENOSYS") {
+        return;
+      }
+      throw error;
+    }
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "link.txt",
+        "link.txt",
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n safe\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n anchor\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "resolves outside the working directory"
+    );
+    expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
+  });
+
   test("patch paths may not be absolute", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-absolute-path-"));
     const absolutePath = join(cwd, "file.txt");
@@ -1766,7 +1850,7 @@ describe("format hardening", () => {
     );
   });
 
-  test.skipIf(process.getuid?.() === 0)(
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "failed cross-file staging leaves originals untouched",
     async () => {
       const cwd = await mkdtemp(join(tmpdir(), "blockpatch-interrupted-"));

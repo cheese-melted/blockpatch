@@ -4,6 +4,22 @@
   "description": "Anchored text block relocation patches",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cheese-melted/blockpatch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cheese-melted/blockpatch/issues"
+  },
+  "homepage": "https://github.com/cheese-melted/blockpatch#readme",
+  "keywords": [
+    "patch",
+    "diff",
+    "refactor",
+    "codemod",
+    "text",
+    "agent"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -18,6 +34,7 @@
   "files": [
     "dist",
     "README.md",
+    "CONTRIBUTING.md",
     "LICENSE"
   ],
   "scripts": {
@@ -27,7 +44,7 @@
     "publish:dry": "npm publish --dry-run"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "^1.3.14",
     "typescript": "^5.8.3"
   },
   "engines": {
