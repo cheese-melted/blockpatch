@@ -43,6 +43,7 @@ export type ApplyStatus = "applied" | "noop" | "already_applied";
 export interface ApplyResult {
   changed: string[];
   affected: string[];
+  written: boolean;
   noop: boolean;
   status: ApplyStatus;
   moves: MoveResultDetails[];
@@ -79,5 +80,6 @@ export interface BlockPatchJsonError {
     phase?: string;
     anchor?: string;
     matches?: number;
+    ranges?: ByteRangeResult[];
   };
 }

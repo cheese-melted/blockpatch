@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -19,6 +19,19 @@ async function fixtureCase(name: string): Promise<string> {
   await writeFile(join(cwd, "file.txt"), before);
   await writeFile(join(cwd, "patch.blockpatch"), patch);
   return cwd;
+}
+
+async function symlinkOrSkip(target: string, path: string): Promise<boolean> {
+  try {
+    await symlink(target, path);
+    return true;
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "EPERM" || code === "EACCES" || code === "ENOSYS") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 async function expectFixtureApply(name: string): Promise<void> {
@@ -49,6 +62,7 @@ describe("blockpatch golden fixtures", () => {
     const result = await applyPatchFile("patch.blockpatch", { cwd });
     expect(result.changed).toEqual([]);
     expect(result.affected).toEqual(["file.txt"]);
+    expect(result.written).toBe(false);
     expect(result.noop).toBe(true);
     expect(result.status).toBe("already_applied");
     expect(result.moves[0]).toMatchObject({
@@ -59,7 +73,31 @@ describe("blockpatch golden fixtures", () => {
   });
 
   test("ambiguous source", async () => {
-    await expectFixtureFailure("ambiguous-source", "Source block is ambiguous");
+    const cwd = await fixtureCase("ambiguous-source");
+    const before = await readFile(join(cwd, "file.txt"));
+    const sourceBlock = Buffer.from("alpha\nmove me\nomega\n");
+    const secondStart = Buffer.from("alpha\nmove me\nomega\ntarget\n").length;
+
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("Source block is ambiguous");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "file.txt",
+      phase: "source",
+      anchor: "blockpatch-source",
+      matches: 2,
+      ranges: [
+        { start: 0, end: sourceBlock.length },
+        { start: secondStart, end: secondStart + sourceBlock.length }
+      ]
+    });
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
   });
 
   test("ambiguous target", async () => {
@@ -89,8 +127,10 @@ describe("blockpatch golden fixtures", () => {
   test("dry-run does not modify file", async () => {
     const cwd = await fixtureCase("dry-run");
     const before = await readFile(join(cwd, "file.txt"));
-    await applyPatchFile("patch.blockpatch", { cwd, dryRun: true });
+    const result = await applyPatchFile("patch.blockpatch", { cwd, dryRun: true });
     const after = await readFile(join(cwd, "file.txt"));
+    expect(result.changed).toEqual(["file.txt"]);
+    expect(result.written).toBe(false);
     expect(after).toEqual(before);
   });
 
@@ -101,6 +141,7 @@ describe("blockpatch golden fixtures", () => {
     const after = await readFile(join(cwd, "file.txt"));
     expect(result.changed).toEqual(["file.txt"]);
     expect(result.affected).toEqual(["file.txt"]);
+    expect(result.written).toBe(false);
     expect(result.noop).toBe(false);
     expect(result.status).toBe("applied");
     expect(result.moves).toHaveLength(1);
@@ -123,6 +164,7 @@ describe("blockpatch golden fixtures", () => {
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
     expect(result.changed).toEqual(["file.txt"]);
     expect(result.affected).toEqual(["file.txt"]);
+    expect(result.written).toBe(true);
     expect(result.status).toBe("applied");
     expect(result.moves[0]).toMatchObject({
       src: "file.txt",
@@ -139,6 +181,7 @@ describe("blockpatch golden fixtures", () => {
     const result = await checkPatchFile("patch.blockpatch", { cwd, reverse: true });
     expect(await readFile(join(cwd, "file.txt"))).toEqual(applied);
     expect(result.changed).toEqual(["file.txt"]);
+    expect(result.written).toBe(false);
     expect(result.status).toBe("applied");
   });
 
@@ -149,6 +192,7 @@ describe("blockpatch golden fixtures", () => {
     const result = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
     expect(result.changed).toEqual([]);
+    expect(result.written).toBe(false);
     expect(result.noop).toBe(true);
     expect(result.status).toBe("already_applied");
     expect(result.moves[0]).toMatchObject({
@@ -272,6 +316,7 @@ describe("byte preservation", () => {
     expect(actual).toBe("alpha\nmove me\nomega\n");
     expect(result.changed).toEqual([]);
     expect(result.affected).toEqual(["file.txt"]);
+    expect(result.written).toBe(false);
     expect(result.noop).toBe(true);
     expect(result.status).toBe("noop");
     expect(result.moves[0].source_range).toEqual({ start: "alpha\n".length, end: "alpha\nmove me\n".length });
@@ -304,6 +349,7 @@ describe("byte preservation", () => {
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe(alreadyApplied);
     expect(result.changed).toEqual([]);
     expect(result.affected).toEqual(["file.txt"]);
+    expect(result.written).toBe(false);
     expect(result.noop).toBe(true);
     expect(result.status).toBe("already_applied");
     expect(result.moves[0]).toMatchObject({
@@ -318,7 +364,9 @@ describe("byte preservation", () => {
 
   test("ambiguous already-applied target is rejected", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-already-applied-ambiguous-"));
-    await writeFile(join(cwd, "file.txt"), "alpha\nomega\ntarget\nmove me\ntail\ntarget\nmove me\ntail\n");
+    const appliedTarget = "target\nmove me\ntail\n";
+    const file = `alpha\nomega\n${appliedTarget}${appliedTarget}`;
+    await writeFile(join(cwd, "file.txt"), file);
     await writeFile(
       join(cwd, "patch.blockpatch"),
       "diff --blockpatch a/file.txt b/file.txt\n" +
@@ -338,9 +386,27 @@ describe("byte preservation", () => {
         " tail\n"
     );
 
-    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
-      "Already-applied target is ambiguous"
-    );
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+
+    const firstStart = file.indexOf(appliedTarget);
+    const secondStart = file.indexOf(appliedTarget, firstStart + 1);
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("Already-applied target is ambiguous");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "file.txt",
+      phase: "target",
+      anchor: "blockpatch-target",
+      matches: 2,
+      ranges: [
+        { start: firstStart, end: firstStart + appliedTarget.length },
+        { start: secondStart, end: secondStart + appliedTarget.length }
+      ]
+    });
   });
 
   test("source hunk can start at the beginning of a file", async () => {
@@ -555,6 +621,7 @@ describe("CLI", () => {
       ok: boolean;
       changed: string[];
       affected: string[];
+      written: boolean;
       status: string;
       moves: Array<{ payload_sha256: string; source_range: { start: number; end: number } }>;
     };
@@ -562,6 +629,7 @@ describe("CLI", () => {
       ok: true,
       changed: ["file.txt"],
       affected: ["file.txt"],
+      written: false,
       status: "applied"
     });
     expect(stdout.moves[0]).toMatchObject({
@@ -744,6 +812,7 @@ describe("CLI", () => {
       ok: boolean;
       changed: string[];
       affected: string[];
+      written: boolean;
       noop: boolean;
       status: string;
       moves: Array<{ src: string; dst: string; payload_sha256: string; payload_bytes: number }>;
@@ -751,6 +820,7 @@ describe("CLI", () => {
     expect(stdout.ok).toBe(true);
     expect(stdout.changed).toEqual(["source.ts"]);
     expect(stdout.affected).toEqual(["source.ts"]);
+    expect(stdout.written).toBe(false);
     expect(stdout.noop).toBe(false);
     expect(stdout.status).toBe("applied");
     expect(stdout.moves[0]).toMatchObject({
@@ -788,6 +858,7 @@ describe("CLI", () => {
       ok: boolean;
       changed: string[];
       affected: string[];
+      written: boolean;
       status: string;
       moves: Array<{
         payload_sha256: string;
@@ -800,6 +871,7 @@ describe("CLI", () => {
       ok: true,
       changed: ["source.ts"],
       affected: ["source.ts"],
+      written: false,
       status: "applied"
     });
     expect(stdout.moves[0]).toMatchObject({
@@ -840,6 +912,7 @@ describe("CLI", () => {
       ok: boolean;
       changed: string[];
       affected: string[];
+      written: boolean;
       noop: boolean;
       status: string;
       patch: string;
@@ -849,6 +922,7 @@ describe("CLI", () => {
       ok: true,
       changed: ["source.ts"],
       affected: ["source.ts"],
+      written: false,
       noop: false,
       status: "applied"
     });
@@ -1134,6 +1208,7 @@ describe("CLI", () => {
     const retry = await applyPatchFile("generated.blockpatch", { cwd });
     expect(retry.changed).toEqual([]);
     expect(retry.affected).toEqual(["source.ts", "target.ts"]);
+    expect(retry.written).toBe(false);
     expect(retry.noop).toBe(true);
     expect(retry.status).toBe("already_applied");
     expect(retry.moves[0]).toMatchObject({
@@ -1146,6 +1221,7 @@ describe("CLI", () => {
     const reversed = await applyPatchFile("generated.blockpatch", { cwd, reverse: true });
     expect(reversed.changed).toEqual(["target.ts", "source.ts"]);
     expect(reversed.affected).toEqual(["target.ts", "source.ts"]);
+    expect(reversed.written).toBe(true);
     expect(reversed.status).toBe("applied");
     expect(reversed.moves[0]).toMatchObject({
       src: "target.ts",
@@ -1158,6 +1234,7 @@ describe("CLI", () => {
     const reverseRetry = await applyPatchFile("generated.blockpatch", { cwd, reverse: true });
     expect(reverseRetry.changed).toEqual([]);
     expect(reverseRetry.affected).toEqual(["target.ts", "source.ts"]);
+    expect(reverseRetry.written).toBe(false);
     expect(reverseRetry.status).toBe("already_applied");
     expect(reverseRetry.moves[0]).toMatchObject({
       src: "target.ts",
@@ -1325,10 +1402,9 @@ describe("CLI", () => {
 
   test("move --json-output includes structured match details", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-json-error-details-"));
-    await writeFile(
-      join(cwd, "source.ts"),
-      "function movedThing() {\n}\nclass Target {\n}\nclass Target {\n}\n"
-    );
+    const targetAnchor = "class Target {\n";
+    const source = `function movedThing() {\n}\n${targetAnchor.repeat(12)}`;
+    await writeFile(join(cwd, "source.ts"), source);
     const proc = Bun.spawn({
       cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
       stdin: "pipe",
@@ -1340,7 +1416,7 @@ describe("CLI", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        target_before: "class Target {\n"
+        target_before: targetAnchor
       })
     );
     proc.stdin.end();
@@ -1348,15 +1424,32 @@ describe("CLI", () => {
     expect(await proc.exited).toBe(1);
     const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
       ok: boolean;
-      error: { code: string; path: string; phase: string; anchor: string; matches: number };
+      error: {
+        code: string;
+        path: string;
+        phase: string;
+        anchor: string;
+        matches: number;
+        ranges: Array<{ start: number; end: number }>;
+      };
     };
+    const firstTargetStart = source.indexOf(targetAnchor);
     expect(stderr.ok).toBe(false);
     expect(stderr.error).toMatchObject({
       code: "target_ambiguous",
       path: "source.ts",
       phase: "target",
       anchor: "target_before",
-      matches: 2
+      matches: 12
+    });
+    expect(stderr.error.ranges).toHaveLength(10);
+    expect(stderr.error.ranges[0]).toEqual({
+      start: firstTargetStart,
+      end: firstTargetStart + targetAnchor.length
+    });
+    expect(stderr.error.ranges[9]).toEqual({
+      start: firstTargetStart + 9 * targetAnchor.length,
+      end: firstTargetStart + 10 * targetAnchor.length
     });
   });
 
@@ -1461,14 +1554,16 @@ describe("patch --fuzz=0 conformance", () => {
 describe("moveBlock API", () => {
   test("fails on ambiguous source delimiters without modifying file", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-ambiguous-"));
+    const sourceBlock = "function movedThing() {\n}\n";
     await writeFile(
       join(cwd, "source.ts"),
-      "function movedThing() {\n}\nfunction movedThing() {\n}\nclass Target {\n}\n"
+      `${sourceBlock}${sourceBlock}class Target {\n}\n`
     );
     const before = await readFile(join(cwd, "source.ts"));
 
-    await expect(
-      moveBlock(
+    let error: unknown;
+    try {
+      await moveBlock(
         {
           src: "source.ts",
           src_start: "function movedThing() {\n",
@@ -1476,8 +1571,23 @@ describe("moveBlock API", () => {
           target_before: "class Target {\n"
         },
         { cwd }
-      )
-    ).rejects.toThrow("ambiguous");
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("Source delimiters are ambiguous");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "source.ts",
+      phase: "source",
+      anchor: "src_start/src_end",
+      matches: 2,
+      ranges: [
+        { start: 0, end: sourceBlock.length },
+        { start: sourceBlock.length, end: sourceBlock.length * 2 }
+      ]
+    });
 
     expect(await readFile(join(cwd, "source.ts"))).toEqual(before);
   });
@@ -1499,6 +1609,7 @@ describe("moveBlock API", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe("alpha\nmove me\nomega\ntail\n");
     expect(result.changed).toEqual([]);
     expect(result.affected).toEqual(["source.ts"]);
+    expect(result.written).toBe(false);
     expect(result.noop).toBe(true);
     expect(result.status).toBe("noop");
     expect(result.moves[0]).toMatchObject({
@@ -1634,6 +1745,32 @@ describe("moveBlock API", () => {
     ).rejects.toThrow("Invalid source path");
   });
 
+  test("rejects symlink src paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-symlink-"));
+    const realPath = join(cwd, "real.ts");
+    const linkPath = join(cwd, "link.ts");
+    const before = "function movedThing() {\n}\nclass Target {\n}\n";
+    await writeFile(realPath, before);
+    if (!(await symlinkOrSkip("real.ts", linkPath))) {
+      return;
+    }
+
+    await expect(
+      moveBlock(
+        {
+          src: "link.ts",
+          src_start: "function movedThing() {\n",
+          src_end: "}\n",
+          target_before: "class Target {\n"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("must not contain symbolic links");
+
+    expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(realPath, "utf8")).toBe(before);
+  });
+
   test("--diff emits real line-number hints", async () => {
     const cwd = await moveFixture();
     const result = await moveBlock(
@@ -1707,19 +1844,13 @@ describe("format hardening", () => {
     expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
   });
 
-  test("patch paths may not escape the working directory through a symlink", async () => {
-    const parent = await mkdtemp(join(tmpdir(), "blockpatch-symlink-escape-"));
-    const cwd = join(parent, "repo");
-    await mkdir(cwd);
-    await writeFile(join(parent, "outside.txt"), "safe\nmove me\nomega\nanchor\n");
-    try {
-      await symlink(join(parent, "outside.txt"), join(cwd, "link.txt"));
-    } catch (error) {
-      const code = (error as { code?: string }).code;
-      if (code === "EPERM" || code === "EACCES" || code === "ENOSYS") {
-        return;
-      }
-      throw error;
+  test("patch paths may not use in-tree symlinks", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-symlink-"));
+    const realPath = join(cwd, "real.txt");
+    const linkPath = join(cwd, "link.txt");
+    await writeFile(realPath, "safe\nmove me\nomega\nanchor\n");
+    if (!(await symlinkOrSkip("real.txt", linkPath))) {
+      return;
     }
     await writeFile(
       join(cwd, "patch.blockpatch"),
@@ -1733,7 +1864,60 @@ describe("format hardening", () => {
     );
 
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
-      "resolves outside the working directory"
+      "must not contain symbolic links"
+    );
+    expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(realPath, "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
+  });
+
+  test("patch paths may not use symlink directory components", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-symlink-dir-"));
+    await mkdir(join(cwd, "real-dir"));
+    const realPath = join(cwd, "real-dir", "file.txt");
+    const linkPath = join(cwd, "link-dir");
+    await writeFile(realPath, "safe\nmove me\nomega\nanchor\n");
+    if (!(await symlinkOrSkip("real-dir", linkPath))) {
+      return;
+    }
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "link-dir/file.txt",
+        "link-dir/file.txt",
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n safe\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n anchor\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain symbolic links"
+    );
+    expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(realPath, "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
+  });
+
+  test("patch paths may not escape the working directory through a symlink", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-symlink-escape-"));
+    const cwd = join(parent, "repo");
+    await mkdir(cwd);
+    await writeFile(join(parent, "outside.txt"), "safe\nmove me\nomega\nanchor\n");
+    if (!(await symlinkOrSkip(join(parent, "outside.txt"), join(cwd, "link.txt")))) {
+      return;
+    }
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "link.txt",
+        "link.txt",
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n safe\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n anchor\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain symbolic links"
     );
     expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
   });
@@ -1790,8 +1974,9 @@ describe("format hardening", () => {
 
     expect(await proc.exited).toBe(0);
     expect(await new Response(proc.stderr).text()).toBe("");
-    const stdout = JSON.parse(await new Response(proc.stdout).text()) as { changed: string[] };
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as { changed: string[]; written: boolean };
     expect(stdout.changed).toEqual(["file.txt"]);
+    expect(stdout.written).toBe(true);
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("safe\nomega\nanchor\nmove me\n");
   });
 

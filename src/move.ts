@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { fail } from "./errors";
+import { boundedRanges, fail } from "./errors";
 import {
   buildMoveSelection,
   commitMove,
@@ -64,12 +64,13 @@ export async function moveBlock(
   const patch = options.diff
     ? renderMovePatch(normalized, srcOriginal, dstOriginal, selection, sameFile, payloadSha256)
     : undefined;
+  const writeSuppressed = dryRun || options.diff === true;
 
   const changed = await commitMove({
     srcPath,
     dstPath,
     sameFile,
-    dryRun: dryRun || options.diff === true,
+    dryRun: writeSuppressed,
     srcOriginal,
     dstOriginal,
     selection,
@@ -80,6 +81,7 @@ export async function moveBlock(
   return {
     changed,
     affected: unique([normalized.src, normalized.dst]),
+    written: !writeSuppressed && changed.length > 0,
     noop: changed.length === 0,
     status: changed.length === 0 ? "noop" : "applied",
     moves: [
@@ -183,7 +185,8 @@ function findSource(file: Buffer, args: NormalizedMoveBlockArgs): ByteRange {
       path: args.src,
       phase: "source",
       anchor: "src_start/src_end",
-      matches: ranges.length
+      matches: ranges.length,
+      ranges: boundedRanges(ranges)
     });
   }
 

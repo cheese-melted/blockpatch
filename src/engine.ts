@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { fail } from "./errors";
+import { boundedMatchRanges, boundedRanges, fail } from "./errors";
 import { parseBlockPatch } from "./parser";
 import { resolvePath } from "./paths";
 import type { ApplyOptions, ApplyResult, BlockPatch, MoveResultDetails } from "./types";
@@ -114,6 +114,7 @@ async function applyMovePatch(
     return {
       changed: [],
       affected: unique([effectivePatch.src, effectivePatch.dst]),
+      written: false,
       noop: true,
       status: "already_applied",
       moves: [plan.details]
@@ -136,6 +137,7 @@ async function applyMovePatch(
   return {
     changed,
     affected: unique([effectivePatch.src, effectivePatch.dst]),
+    written: !dryRun && changed.length > 0,
     noop: changed.length === 0,
     status: changed.length === 0 ? "noop" : "applied",
     moves: [
@@ -324,7 +326,8 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
       path: patch.src,
       phase: "source",
       anchor: "blockpatch-source",
-      matches: fullMatches.length
+      matches: fullMatches.length,
+      ranges: boundedMatchRanges(fullMatches, fullSource.length)
     });
   }
 
@@ -347,7 +350,8 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
       path: patch.src,
       phase: "source",
       anchor: "blockpatch-source",
-      matches: envelopes.length
+      matches: envelopes.length,
+      ranges: boundedRanges(envelopes)
     });
   }
 
@@ -378,7 +382,8 @@ function findAlreadyAppliedTargetSelection(
         path: patch.dst,
         phase: "target",
         anchor: "blockpatch-target",
-        matches: matches.length
+        matches: matches.length,
+        ranges: boundedMatchRanges(matches, alreadyApplied.length)
       }
     );
   }
@@ -428,7 +433,8 @@ export function findTargetSelection(
     fail("target_ambiguous", `Target anchor is ambiguous in ${dstLabel}; matched ${matches.length} locations`, {
       path: dstLabel,
       ...details,
-      matches: matches.length
+      matches: matches.length,
+      ranges: boundedMatchRanges(matches, anchor.length)
     });
   }
 

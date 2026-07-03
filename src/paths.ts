@@ -1,5 +1,5 @@
-import { realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fail } from "./errors";
 
 export function resolvePath(cwd: string, path: string, label: string): string {
@@ -21,12 +21,32 @@ export function resolvePath(cwd: string, path: string, label: string): string {
     fail("path_outside_cwd", `${label} escapes the working directory: ${path}`, { path, phase: "path" });
   }
 
+  rejectSymlinkComponents(root, resolved, path, label);
+
   const realResolved = realpathSync(resolved);
   if (!isInside(realRoot, realResolved)) {
     fail("path_outside_cwd", `${label} resolves outside the working directory: ${path}`, { path, phase: "path" });
   }
 
   return resolved;
+}
+
+function rejectSymlinkComponents(root: string, resolved: string, originalPath: string, label: string): void {
+  const relativePath = relative(root, resolved);
+  if (relativePath === "") {
+    return;
+  }
+
+  let current = root;
+  for (const part of relativePath.split(sep)) {
+    current = join(current, part);
+    if (lstatSync(current).isSymbolicLink()) {
+      fail("symlink_path", `${label} must not contain symbolic links: ${originalPath}`, {
+        path: originalPath,
+        phase: "path"
+      });
+    }
+  }
 }
 
 function isInside(root: string, path: string): boolean {

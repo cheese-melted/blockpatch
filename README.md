@@ -48,7 +48,7 @@ blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-
 
 `check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing. `-R`/`--reverse` moves the verified payload back from the target location to the source location; it works with both `check` and `apply`.
 
-Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths and `..` escapes are rejected. Existing operation paths are also resolved through symlinks; if the real path escapes `--cwd`, the operation is rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
+Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths, `..` escapes, and operation paths containing symlink components are rejected. Existing regular files are also realpath-checked; if the real path escapes `--cwd`, the operation is rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
 
 `apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Because patch headers require `a/` and `b/` prefixes, the default is equivalent to `-p1`.
 
@@ -70,6 +70,8 @@ JSON
 Insertion occurs between `target_before` and `target_after`. Either side may be omitted, but not both. With only `target_before`, the block is inserted after that context. With only `target_after`, the block is inserted before that context.
 
 Matching and insertion are byte-exact: the moved bytes are cut at the source and inserted directly at the anchor boundary, with no newline handling. Keep delimiters and anchors on line boundaries or the result will splice mid-line. Include the surrounding newlines you want moved in `src_start` and `src_end`.
+
+The move JSON and `--diff` planner interfaces are UTF-8 text interfaces. They are intended for source text, not arbitrary binary payloads or invalid UTF-8 byte sequences.
 
 The same shape can be loaded from a file:
 
@@ -138,6 +140,7 @@ type ApplyResult = {
   ok: true
   changed: string[]
   affected: string[]
+  written: boolean
   noop: boolean
   status: "applied" | "noop" | "already_applied"
   patch?: string
@@ -154,7 +157,7 @@ type ApplyResult = {
 }
 ```
 
-`changed` lists paths whose content changed, or would change during `check` and `--dry-run`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the source block is already absent and the exact target-before + payload + target-after bytes are present once. `patch` is present when `move --diff --json-output` is used. In `already_applied` results, `source_range` is `null` because the source block is no longer present. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
+`changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the source block is already absent and the exact target-before + payload + target-after bytes are present once. `patch` is present when `move --diff --json-output` is used. In `already_applied` results, `source_range` is `null` because the source block is no longer present. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
 
 Errors print:
 
@@ -169,9 +172,41 @@ type BlockPatchJsonError = {
     phase?: string
     anchor?: string
     matches?: number
+    ranges?: Array<{ start: number; end: number }>
   }
 }
 ```
+
+Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges. They do not include source snippets, fuzzy suggestions, or repair guidance.
+
+Error codes are the agent-facing branch contract. From `1.0.0` onward, removing a code or changing its meaning is semver-major.
+
+```ts
+type ErrorCode =
+  | "parse_error"
+  | "invalid_path"
+  | "path_outside_cwd"
+  | "symlink_path"
+  | "source_not_found"
+  | "source_ambiguous"
+  | "target_not_found"
+  | "target_ambiguous"
+  | "payload_mismatch"
+  | "hash_mismatch"
+  | "target_overlaps_source"
+  | "already_applied"
+  | "invalid_move_args"
+  | "invalid_json"
+  | "missing_move_args"
+  | "unknown_command"
+  | "unknown_option"
+  | "invalid_option"
+  | "missing_option_value"
+  | "too_many_args"
+  | "unexpected_error"
+```
+
+`unexpected_error` is the generic fallback for non-`BlockPatchError` failures; agents should treat it as an internal failure and avoid branching on its message.
 
 ## V1 Format
 
@@ -323,6 +358,8 @@ Hunk body lines use unified-diff prefixes:
 - `+` for target payload
 
 The byte content after the prefix is matched exactly, including line endings. The standard `\ No newline at end of file` marker is supported for a hunk body line without a trailing newline.
+
+`.blockpatch` `apply` and `check` preserve parsed hunk body bytes exactly, including CRLF and no-trailing-newline cases. `move --json` and generated `move --diff` output render anchors and payloads as UTF-8 text, so they are not a binary-safe round trip for invalid UTF-8.
 
 Blank lines are separators between the header and hunks. A blank line inside a hunk body is an error; encode an empty context line as a single space.
 
