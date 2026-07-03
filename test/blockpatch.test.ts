@@ -35,7 +35,7 @@ async function expectFixtureFailure(name: string, message: string): Promise<void
   expect(after).toEqual(before);
 }
 
-describe("blockpatch v0 golden fixtures", () => {
+describe("blockpatch golden fixtures", () => {
   test("successful move", async () => {
     await expectFixtureApply("success");
   });
@@ -104,17 +104,17 @@ describe("byte preservation", () => {
       join(cwd, "patch.blockpatch"),
       Buffer.from(
         "diff --blockpatch a/file.txt b/file.txt\n" +
-          "blockpatch version 0\n" +
+          "blockpatch version 1\n" +
           "blockpatch move id=move-1 payload-sha256=10d316fe0179a4ccaa97a509f75294785f941d7f9b0656684844edcdf1b5a01a\n" +
           "--- a/file.txt\n" +
           "+++ b/file.txt\n" +
           "\n" +
-          "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+          "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
           " alpha\r\n" +
           "-move me\r\n" +
           " omega\r\n" +
           "\n" +
-          "@@ blockpatch-target move-1 -4,1 +4,2 @@\n" +
+          "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n" +
           " target\r\n" +
           "+move me\r\n",
         "utf8"
@@ -133,17 +133,17 @@ describe("byte preservation", () => {
       join(cwd, "patch.blockpatch"),
       Buffer.from(
         "diff --blockpatch a/file.txt b/file.txt\n" +
-          "blockpatch version 0\n" +
+          "blockpatch version 1\n" +
           "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
           "--- a/file.txt\n" +
           "+++ b/file.txt\n" +
           "\n" +
-          "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+          "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
           " alpha\n" +
           "-move me\n" +
           " omega\n" +
           "\n" +
-          "@@ blockpatch-target move-1 -4,1 +4,2 @@\n" +
+          "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n" +
           "+move me\n" +
           " target\n" +
           "\\ No newline at end of file\n",
@@ -162,17 +162,17 @@ describe("byte preservation", () => {
     await writeFile(
       join(cwd, "patch.blockpatch"),
       "diff --blockpatch a/file.txt b/file.txt\n" +
-        "blockpatch version 0\n" +
+        "blockpatch version 1\n" +
         "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
         "--- a/file.txt\n" +
         "+++ b/file.txt\n" +
         "\n" +
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
         " alpha\n" +
         "-move me\n" +
         " omega\n" +
         "\n" +
-        "@@ blockpatch-target move-1 -2,1 +2,2 @@\n" +
+        "@@ -2,1 +2,2 @@ blockpatch-target id=move-1\n" +
         " move me\n" +
         "+move me\n"
     );
@@ -189,17 +189,17 @@ describe("byte preservation", () => {
     await writeFile(
       join(cwd, "patch.blockpatch"),
       "diff --blockpatch a/file.txt b/file.txt\n" +
-        "blockpatch version 0\n" +
+        "blockpatch version 1\n" +
         "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
         "--- a/file.txt\n" +
         "+++ b/file.txt\n" +
         "\n" +
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
         " alpha\n" +
         "-move me\n" +
         " omega\n" +
         "\n" +
-        "@@ blockpatch-target move-1 -3,1 +2,2 @@\n" +
+        "@@ -3,1 +2,2 @@ blockpatch-target id=move-1\n" +
         "+move me\n" +
         " omega\n"
     );
@@ -219,16 +219,16 @@ describe("byte preservation", () => {
     await writeFile(
       join(cwd, "patch.blockpatch"),
       "diff --blockpatch a/file.txt b/file.txt\n" +
-        "blockpatch version 0\n" +
+        "blockpatch version 1\n" +
         "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
         "--- a/file.txt\n" +
         "+++ b/file.txt\n" +
         "\n" +
-        "@@ blockpatch-source move-1 -1,2 +1,1 @@\n" +
+        "@@ -1,2 +1,1 @@ blockpatch-source id=move-1\n" +
         "-move me\n" +
         " omega\n" +
         "\n" +
-        "@@ blockpatch-target move-1 -3,1 +3,2 @@\n" +
+        "@@ -3,1 +3,2 @@ blockpatch-target id=move-1\n" +
         " target\n" +
         "+move me\n"
     );
@@ -244,16 +244,16 @@ describe("byte preservation", () => {
     await writeFile(
       join(cwd, "patch.blockpatch"),
       "diff --blockpatch a/file.txt b/file.txt\n" +
-        "blockpatch version 0\n" +
+        "blockpatch version 1\n" +
         "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
         "--- a/file.txt\n" +
         "+++ b/file.txt\n" +
         "\n" +
-        "@@ blockpatch-source move-1 -2,2 +2,1 @@\n" +
+        "@@ -2,2 +2,1 @@ blockpatch-source id=move-1\n" +
         " target\n" +
         "-move me\n" +
         "\n" +
-        "@@ blockpatch-target move-1 -1,1 +1,2 @@\n" +
+        "@@ -1,1 +1,2 @@ blockpatch-target id=move-1\n" +
         " alpha\n" +
         "+move me\n"
     );
@@ -269,17 +269,17 @@ describe("byte preservation", () => {
     await writeFile(
       join(cwd, "patch.blockpatch"),
       "diff --blockpatch a/file.txt b/file.txt\n" +
-        "blockpatch version 0\n" +
+        "blockpatch version 1\n" +
         "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
         "--- a/file.txt\n" +
         "+++ b/file.txt\n" +
         "\n" +
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
         " alpha\n" +
         "-move me\n" +
         " omega\n" +
         "\n" +
-        "@@ blockpatch-target move-1 -4,2 +4,3 @@\n" +
+        "@@ -4,2 +4,3 @@ blockpatch-target id=move-1\n" +
         " target\n" +
         "+move me\n" +
         " tail\n"
@@ -296,17 +296,17 @@ describe("byte preservation", () => {
     await writeFile(
       join(cwd, "patch.blockpatch"),
       "diff --blockpatch a/file.txt b/file.txt\n" +
-        "blockpatch version 0\n" +
+        "blockpatch version 1\n" +
         "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
         "--- a/file.txt\n" +
         "+++ b/file.txt\n" +
         "\n" +
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
         " alpha\n" +
         "-move me\n" +
         " omega\n" +
         "\n" +
-        "@@ blockpatch-target move-1 -4,2 +4,3 @@\n" +
+        "@@ -4,2 +4,3 @@ blockpatch-target id=move-1\n" +
         " target\n" +
         "+move me\n" +
         " expected-tail\n"
@@ -471,7 +471,7 @@ describe("CLI", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        dst_after: "class Target {\n"
+        target_before: "class Target {\n"
       })
     );
     proc.stdin.end();
@@ -495,8 +495,8 @@ describe("CLI", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        dst_before: "class Target {\n",
-        dst_after: "}\n"
+        target_before: "class Target {\n",
+        target_after: "}\n"
       })
     );
     proc.stdin.end();
@@ -507,7 +507,7 @@ describe("CLI", () => {
     expect(actual).toBe("alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n");
   });
 
-  test("move --json accepts target_before and target_after aliases", async () => {
+  test("move --json accepts target_before and target_after", async () => {
     const cwd = await moveFixture();
     const proc = Bun.spawn({
       cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--cwd", cwd],
@@ -546,8 +546,8 @@ describe("CLI", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        dst_before: "class Target {\n",
-        dst_after: "}\n"
+        target_before: "class Target {\n",
+        target_after: "}\n"
       })
     );
     proc.stdin.end();
@@ -583,7 +583,7 @@ describe("CLI", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        dst_after: "class Target {\n"
+        target_before: "class Target {\n"
       })
     );
 
@@ -614,7 +614,7 @@ describe("CLI", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        dst_after: "class Target {\n"
+        target_before: "class Target {\n"
       })
     );
 
@@ -649,7 +649,7 @@ describe("CLI", () => {
         "}\n",
         "--dst",
         "target.ts",
-        "--dst-after",
+        "--target-before",
         "class Target {\n",
         "--cwd",
         cwd
@@ -715,7 +715,7 @@ describe("CLI", () => {
         "}\n",
         "--dst",
         "target.ts",
-        "--dst-after",
+        "--target-before",
         "class Target {\n",
         "--diff",
         "--cwd",
@@ -749,7 +749,7 @@ describe("CLI", () => {
         "function movedThing() {\n",
         "--src-end",
         "}\n",
-        "--dst-after",
+        "--target-before",
         "class Target {\n",
         "--diff",
         "--cwd",
@@ -788,7 +788,7 @@ describe("CLI", () => {
         "function movedThing() {\n",
         "--src-end",
         "}\n",
-        "--dst-after",
+        "--target-before",
         "class Target {\n",
         "--diff",
         "--cwd",
@@ -844,7 +844,7 @@ describe("CLI", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        dst_after: "class Target {\n"
+        target_before: "class Target {\n"
       })
     );
     proc.stdin.end();
@@ -891,7 +891,7 @@ describe("moveBlock API", () => {
           src: "source.ts",
           src_start: "function movedThing() {\n",
           src_end: "}\n",
-          dst_after: "class Target {\n"
+          target_before: "class Target {\n"
         },
         { cwd }
       )
@@ -909,7 +909,7 @@ describe("moveBlock API", () => {
         src: "source.ts",
         src_start: "move me",
         src_end: "\n",
-        dst_before: "omega\n"
+        target_after: "omega\n"
       },
       { cwd }
     );
@@ -933,9 +933,9 @@ describe("moveBlock API", () => {
         src: "source.ts",
         src_start: "a",
         src_end: "b",
-        dst_afterr: "c"
+        target_afterr: "c"
       } as never)
-    ).rejects.toThrow("Unknown move argument: dst_afterr");
+    ).rejects.toThrow("Unknown move argument: target_afterr");
   });
 
   test("rejects wrongly typed argument values", async () => {
@@ -944,21 +944,21 @@ describe("moveBlock API", () => {
         src: "source.ts",
         src_start: 123,
         src_end: "b",
-        dst_after: "c"
+        target_before: "c"
       } as never)
     ).rejects.toThrow("move argument src_start must be a string");
   });
 
-  test("rejects invalid insert values", async () => {
+  test("rejects legacy insert argument", async () => {
     await expect(
       moveBlock({
         src: "source.ts",
         src_start: "a",
         src_end: "b",
-        dst_after: "c",
+        target_before: "c",
         insert: "around"
       } as never)
-    ).rejects.toThrow('insert must be "before" or "after"');
+    ).rejects.toThrow("Unknown move argument: insert");
   });
 
   test("rejects empty target anchors", async () => {
@@ -967,33 +967,31 @@ describe("moveBlock API", () => {
         src: "source.ts",
         src_start: "a",
         src_end: "b",
-        dst_after: ""
+        target_before: ""
       })
-    ).rejects.toThrow("move requires a non-empty dst_after");
+    ).rejects.toThrow("move requires non-empty target context");
   });
 
-  test("rejects incomplete target_before target_after pair", async () => {
+  test("rejects legacy dst_before argument", async () => {
     await expect(
       moveBlock({
         src: "source.ts",
         src_start: "a",
         src_end: "b",
-        target_before: "c"
-      })
-    ).rejects.toThrow("move requires both target_before and target_after");
+        dst_before: "c"
+      } as never)
+    ).rejects.toThrow("Unknown move argument: dst_before");
   });
 
-  test("rejects mixed target and dst anchor fields", async () => {
+  test("rejects legacy dst_after argument", async () => {
     await expect(
       moveBlock({
         src: "source.ts",
         src_start: "a",
         src_end: "b",
-        target_before: "c",
-        target_after: "d",
         dst_after: "e"
-      })
-    ).rejects.toThrow("cannot combine target_before/target_after with dst_before/dst_after");
+      } as never)
+    ).rejects.toThrow("Unknown move argument: dst_after");
   });
 
   test("rejects src outside the working directory", async () => {
@@ -1004,7 +1002,7 @@ describe("moveBlock API", () => {
           src: "../outside.ts",
           src_start: "a",
           src_end: "b",
-          dst_after: "c"
+          target_before: "c"
         },
         { cwd }
       )
@@ -1018,22 +1016,23 @@ describe("moveBlock API", () => {
         src: "source.ts",
         src_start: "function movedThing() {\n",
         src_end: "}\n",
-        dst_after: "class Target {\n"
+        target_before: "class Target {\n"
       },
       { cwd, diff: true }
     );
 
-    expect(result.patch).toContain("@@ blockpatch-source move-1 -1,5 +1,2 @@");
-    expect(result.patch).toContain("@@ blockpatch-target move-1 -6,1 +3,4 @@");
+    expect(result.patch).toContain("blockpatch version 1");
+    expect(result.patch).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
+    expect(result.patch).toContain("@@ -6,1 +3,4 @@ blockpatch-target id=move-1");
   });
 });
 
-describe("v0 hardening", () => {
+describe("format hardening", () => {
   function patchFor(payload: string, src: string, dst: string, sourceHunk: string, targetHunk: string): string {
     const sha = createHash("sha256").update(payload).digest("hex");
     return (
       `diff --blockpatch a/${src} b/${dst}\n` +
-      "blockpatch version 0\n" +
+      "blockpatch version 1\n" +
       `blockpatch move id=move-1 payload-sha256=${sha}\n` +
       `--- a/${src}\n` +
       `+++ b/${dst}\n` +
@@ -1053,8 +1052,8 @@ describe("v0 hardening", () => {
         "move me\n",
         "./file.txt",
         "file.txt",
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n alpha\n-move me\n omega\n",
-        "@@ blockpatch-target move-1 -2,1 +2,2 @@\n move me\n+move me\n"
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+        "@@ -2,1 +2,2 @@ blockpatch-target id=move-1\n move me\n+move me\n"
       )
     );
 
@@ -1074,8 +1073,8 @@ describe("v0 hardening", () => {
         "move me\n",
         "../outside.txt",
         "../outside.txt",
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n safe\n-move me\n omega\n",
-        "@@ blockpatch-target move-1 -4,1 +4,2 @@\n anchor\n+move me\n"
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n safe\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n anchor\n+move me\n"
       )
     );
 
@@ -1095,8 +1094,8 @@ describe("v0 hardening", () => {
         "move me\n",
         "file.txt",
         "file.txt",
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n safe\n-move me\n omega\n",
-        "@@ blockpatch-target move-1 -4,1 +4,2 @@\n anchor\n+move me\n"
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n safe\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n anchor\n+move me\n"
       )
     );
 
@@ -1128,8 +1127,8 @@ describe("v0 hardening", () => {
       "move me\n",
       "file.txt",
       "file.txt",
-      "@@ blockpatch-source move-1 -1,3 +1,2 @@\n alpha\n-move me\n omega\n",
-      "@@ blockpatch-target move-1 -4,1 +4,2 @@\n target\n+move me\n"
+      "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+      "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
     ).replace("diff --blockpatch a/file.txt b/file.txt", "diff --blockpatch a/other.txt b/other.txt");
     await writeFile(join(cwd, "patch.blockpatch"), patch);
 
@@ -1147,13 +1146,32 @@ describe("v0 hardening", () => {
         "move me\n",
         "file.txt",
         "file.txt",
-        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n alpha\n\n-move me\n omega\n",
-        "@@ blockpatch-target move-1 -4,1 +4,2 @@\n target\n+move me\n"
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
       )
     );
 
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
       "must not contain blank lines"
+    );
+  });
+
+  test("hunk line counts must match the header", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-bad-counts-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "file.txt",
+        "file.txt",
+        "@@ -1,4 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "Hunk line counts do not match header"
     );
   });
 
@@ -1174,7 +1192,7 @@ describe("v0 hardening", () => {
               src_start: "function movedThing() {\n",
               src_end: "}\n",
               dst: "target.ts",
-              dst_after: "class Target {\n"
+              target_before: "class Target {\n"
             },
             { cwd }
           )

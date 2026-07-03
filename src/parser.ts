@@ -10,6 +10,8 @@ interface PatchLine {
 interface Hunk {
   kind: "source" | "target";
   id: string;
+  oldCount: number;
+  newCount: number;
   lines: HunkLine[];
 }
 
@@ -21,7 +23,7 @@ interface HunkLine {
 const noNewlineMarker = "\\ No newline at end of file";
 const movePrefix = "blockpatch move ";
 const hunkPattern =
-  /^@@ blockpatch-(source|target) ([^\s]+) -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$/;
+  /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@ blockpatch-(source|target) id=([^\s]+)(?: .*)?$/;
 
 export function parseBlockPatch(
   input: Buffer,
@@ -85,8 +87,8 @@ function parseHeader(
     fail("parse_error", "Patch must start with diff --blockpatch");
   }
 
-  if (text(lines[1]) !== "blockpatch version 0") {
-    fail("parse_error", "Patch must declare blockpatch version 0");
+  if (text(lines[1]) !== "blockpatch version 1") {
+    fail("parse_error", "Patch must declare blockpatch version 1");
   }
 
   const moveLine = text(lines[2]);
@@ -143,21 +145,23 @@ function parseHunks(lines: PatchLine[], start: number): Hunk[] {
       continue;
     }
 
-    const match = header?.match(hunkPattern);
-    if (match === undefined || match === null) {
+    const parsedHeader = parseHunkHeader(header);
+    if (parsedHeader === undefined) {
       fail("parse_error", "Expected blockpatch source/target hunk header");
     }
 
     const hunk: Hunk = {
-      kind: match[1] === "source" ? "source" : "target",
-      id: match[2],
+      kind: parsedHeader.kind,
+      id: parsedHeader.id,
+      oldCount: parsedHeader.oldCount,
+      newCount: parsedHeader.newCount,
       lines: []
     };
     index += 1;
 
     while (index < lines.length) {
       const maybeHeader = text(lines[index]);
-      if (maybeHeader?.startsWith("@@ blockpatch-") === true) {
+      if (parseHunkHeader(maybeHeader) !== undefined) {
         break;
       }
 
@@ -167,7 +171,7 @@ function parseHunks(lines: PatchLine[], start: number): Hunk[] {
         while (lookahead < lines.length && lines[lookahead].body.length === 0) {
           lookahead += 1;
         }
-        if (lookahead < lines.length && text(lines[lookahead])?.startsWith("@@ blockpatch-") !== true) {
+        if (lookahead < lines.length && parseHunkHeader(text(lines[lookahead])) === undefined) {
           fail(
             "parse_error",
             "Hunk bodies must not contain blank lines; encode an empty context line as a single space"
@@ -194,10 +198,39 @@ function parseHunks(lines: PatchLine[], start: number): Hunk[] {
       index += 1;
     }
 
+    validateHunkCounts(hunk);
     hunks.push(hunk);
   }
 
   return hunks;
+}
+
+function parseHunkHeader(
+  header: string | undefined
+): { kind: "source" | "target"; id: string; oldCount: number; newCount: number } | undefined {
+  const match = header?.match(hunkPattern);
+  if (match === undefined || match === null) {
+    return undefined;
+  }
+
+  return {
+    oldCount: match[1] === undefined ? 1 : Number(match[1]),
+    newCount: match[2] === undefined ? 1 : Number(match[2]),
+    kind: match[3] === "source" ? "source" : "target",
+    id: match[4]
+  };
+}
+
+function validateHunkCounts(hunk: Hunk): void {
+  const oldCount = hunk.lines.filter((line) => line.prefix === " " || line.prefix === "-").length;
+  const newCount = hunk.lines.filter((line) => line.prefix === " " || line.prefix === "+").length;
+
+  if (oldCount !== hunk.oldCount || newCount !== hunk.newCount) {
+    fail(
+      "parse_error",
+      `Hunk line counts do not match header for blockpatch-${hunk.kind} id=${hunk.id}`
+    );
+  }
 }
 
 function parseSourceHunk(hunk: Hunk): { before: Buffer; payload: Buffer; after: Buffer } {

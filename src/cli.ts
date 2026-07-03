@@ -247,16 +247,10 @@ function argToMoveKey(arg: string | undefined): keyof MoveBlockArgs | undefined 
       return "src_end";
     case "--dst":
       return "dst";
-    case "--dst-before":
-      return "dst_before";
-    case "--dst-after":
-      return "dst_after";
     case "--target-before":
       return "target_before";
     case "--target-after":
       return "target_after";
-    case "--insert":
-      return "insert";
     default:
       return undefined;
   }

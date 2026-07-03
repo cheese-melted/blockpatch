@@ -1,14 +1,14 @@
 diff --blockpatch a/file.txt b/file.txt
-blockpatch version 0
+blockpatch version 1
 blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e
 --- a/file.txt
 +++ b/file.txt
 
-@@ blockpatch-source move-1 -1,3 +1,2 @@
+@@ -1,3 +1,2 @@ blockpatch-source id=move-1
  missing alpha
 -move me
  omega
 
-@@ blockpatch-target move-1 -4,1 +4,2 @@
+@@ -4,1 +4,2 @@ blockpatch-target id=move-1
  target
 +move me

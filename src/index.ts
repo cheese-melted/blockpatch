@@ -12,6 +12,5 @@ export type {
   MoveBlockOptions,
   MoveResultDetails,
   MoveBlockResult,
-  TargetAnchor,
-  TargetKind
+  TargetAnchor
 } from "./types";

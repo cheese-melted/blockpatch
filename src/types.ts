@@ -1,5 +1,3 @@
-export type TargetKind = "before" | "after";
-
 export interface BlockPatch {
   type: "move";
   id: string;
@@ -51,11 +49,8 @@ export interface MoveBlockArgs {
   src_start: string;
   src_end: string;
   dst?: string;
-  dst_before?: string;
-  dst_after?: string;
   target_before?: string;
   target_after?: string;
-  insert?: TargetKind;
   dry_run?: boolean;
 }
 

@@ -41,14 +41,14 @@ blockpatch apply -d repo-root -p1 patch.blockpatch
 blockpatch check -p1 < patch.blockpatch
 blockpatch move --json -
 blockpatch move --json move.json
-blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-end $'\n}\n' --dst-after $'class Target {\n'
+blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-end $'\n}\n' --target-before $'class Target {\n'
 ```
 
 `check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing.
 
 Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must resolve inside `--cwd`. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
 
-`apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Because V0 headers require `a/` and `b/` prefixes, the default is equivalent to `-p1`.
+`apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Because patch headers require `a/` and `b/` prefixes, the default is equivalent to `-p1`.
 
 `move` is the plug-and-play agent interface. JSON over stdin is the most reliable form because it avoids shell quoting problems:
 
@@ -65,7 +65,7 @@ blockpatch move --json - <<'JSON'
 JSON
 ```
 
-With `target_before` and `target_after`, insertion occurs between those exact adjacent contexts. For compatibility, the two-sided form may also be written as `dst_before` plus `dst_after`. With only `dst_after`, the legacy one-sided behavior inserts after that anchor. With only `dst_before`, the legacy one-sided behavior inserts before that anchor.
+Insertion occurs between `target_before` and `target_after`. Either side may be omitted, but not both. With only `target_before`, the block is inserted after that context. With only `target_after`, the block is inserted before that context.
 
 Matching and insertion are byte-exact: the moved bytes are cut at the source and inserted directly at the anchor boundary, with no newline handling. Keep delimiters and anchors on line boundaries or the result will splice mid-line. Include the surrounding newlines you want moved in `src_start` and `src_end`.
 
@@ -97,11 +97,8 @@ type MoveBlockArgs = {
   src_start: string
   src_end: string
   dst?: string
-  dst_before?: string
-  dst_after?: string
   target_before?: string
   target_after?: string
-  insert?: "before" | "after"
   dry_run?: boolean
 }
 ```
@@ -110,13 +107,11 @@ Rules:
 
 - `src_start` and `src_end` are inclusive source delimiters.
 - `dst` defaults to `src`.
-- either `target_before` plus `target_after`, `dst_before`, `dst_after`, or both `dst_before` and `dst_after` are required.
-- `target_before` and `target_after` are the preferred two-sided target context fields.
-- if two-sided target contexts are supplied, insertion is between the before and after contexts, and their concatenation must match exactly once.
-- if only one target context is supplied, `dst_after` inserts after that anchor and `dst_before` inserts before that anchor.
-- `target_before`/`target_after` cannot be mixed with `dst_before`/`dst_after`.
-- `insert` is only valid with a one-sided target anchor and must agree with the anchor.
-- either target side may be empty when both are supplied, but not both.
+- `target_before`, `target_after`, or both are required.
+- insertion is between the before and after contexts, and their concatenation must match exactly once.
+- if only `target_before` is supplied, insertion is immediately after that context.
+- if only `target_after` is supplied, insertion is immediately before that context.
+- either target side may be empty when both are supplied, but not both may be empty.
 - source delimiter match must be unique.
 - target anchor match must be unique.
 - moved bytes are extracted from the source file, not regenerated from args.
@@ -161,16 +156,16 @@ type BlockPatchJsonError = {
 }
 ```
 
-## V0 Format
+## V1 Format
 
 ```diff
 diff --blockpatch a/src/example.ts b/src/example.ts
-blockpatch version 0
+blockpatch version 1
 blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988ea43f0f3b0c47228f9dba6b3d
 --- a/src/example.ts
 +++ b/src/example.ts
 
-@@ blockpatch-source move-1 -1,8 +1,4 @@ function movedThing
+@@ -1,8 +1,4 @@ blockpatch-source id=move-1 function movedThing
  function alpha() {
  }
 -
@@ -180,7 +175,7 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
  function omega() {
  }
 
-@@ blockpatch-target move-1 -40,3 +36,7 @@ constructor
+@@ -40,3 +36,7 @@ blockpatch-target id=move-1 constructor
    constructor() {
    }
 +
@@ -198,17 +193,17 @@ The `--- a/<path>` and `+++ b/<path>` headers may name the same file for an intr
 
 ```text
 diff --blockpatch a/<path> b/<path>
-blockpatch version 0
+blockpatch version 1
 blockpatch move id=<id> payload-sha256=<sha256>
 --- a/<path>
 +++ b/<path>
 
-@@ blockpatch-source <id> -<old-start>,<old-count> +<new-start>,<new-count> @@ optional label
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-source id=<id> optional label
 [ <source context before> ]
 -<moved payload>
 [ <source context after> ]
 
-@@ blockpatch-target <id> -<old-start>,<old-count> +<new-start>,<new-count> @@ optional label
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-target id=<id> optional label
 [ <target context before> ]
 +<same moved payload>
 [ <target context after> ]
@@ -216,12 +211,14 @@ blockpatch move id=<id> payload-sha256=<sha256>
 
 Source context before and after are exact byte anchors. Either side may be empty, and payload-only source hunks are allowed if the payload is unique.
 
+The `-<old-start>,<old-count> +<new-start>,<new-count>` ranges are line-number hints for review, not match authority. `blockpatch` validates the line counts against the hunk body, but it locates changes by exact context and payload bytes.
+
 The target hunk must include context on at least one side. `blockpatch` matches `target context before + target context after` exactly once in the destination file and inserts at `start + target context before.length`.
 
 That means insertion occurs between target-before and target-after context:
 
 ```diff
-@@ blockpatch-target move-1 -40,2 +40,3 @@
+@@ -40,2 +40,3 @@ blockpatch-target id=move-1
  context before
 +moved payload
  context after
@@ -278,7 +275,7 @@ Blank lines are separators between the header and hunks. A blank line inside a h
 
 ## Intentionally Out Of Scope
 
-V0 does not implement:
+The current format does not implement:
 
 - multiple independent moves in one patch document
 - arbitrary generated diffs from before/after file snapshots

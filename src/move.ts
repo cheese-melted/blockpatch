@@ -23,18 +23,13 @@ interface NormalizedMoveBlockArgs {
   targetAfter: Buffer;
 }
 
-const empty = Buffer.alloc(0);
-
 const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   src: "string",
   src_start: "string",
   src_end: "string",
   dst: "string",
-  dst_before: "string",
-  dst_after: "string",
   target_before: "string",
   target_after: "string",
-  insert: "string",
   dry_run: "boolean"
 };
 
@@ -103,12 +98,7 @@ export function validateMoveArgs(value: unknown): MoveBlockArgs {
     }
   }
 
-  const args = value as MoveBlockArgs;
-  if (args.insert !== undefined && args.insert !== "before" && args.insert !== "after") {
-    fail("invalid_move_args", 'move argument insert must be "before" or "after"');
-  }
-
-  return args;
+  return value as MoveBlockArgs;
 }
 
 function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
@@ -122,54 +112,15 @@ function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
     fail("invalid_move_args", "move requires src_end");
   }
 
-  const hasDstBefore = args.dst_before !== undefined;
-  const hasDstAfter = args.dst_after !== undefined;
   const hasTargetBefore = args.target_before !== undefined;
   const hasTargetAfter = args.target_after !== undefined;
 
-  if ((hasTargetBefore || hasTargetAfter) && (hasDstBefore || hasDstAfter)) {
-    fail("invalid_move_args", "move cannot combine target_before/target_after with dst_before/dst_after");
+  if (!hasTargetBefore && !hasTargetAfter) {
+    fail("invalid_move_args", "move requires target_before or target_after");
   }
 
-  if (hasTargetBefore !== hasTargetAfter) {
-    fail("invalid_move_args", "move requires both target_before and target_after");
-  }
-
-  if (!hasDstBefore && !hasDstAfter && !hasTargetBefore) {
-    fail("invalid_move_args", "move requires dst_before, dst_after, or target_before/target_after");
-  }
-
-  if ((hasTargetBefore || (hasDstBefore && hasDstAfter)) && args.insert !== undefined) {
-    fail("invalid_move_args", "insert is only valid with a one-sided target anchor");
-  }
-
-  let targetBefore: Buffer;
-  let targetAfter: Buffer;
-  if (hasTargetBefore && hasTargetAfter) {
-    targetBefore = Buffer.from(args.target_before ?? "", "utf8");
-    targetAfter = Buffer.from(args.target_after ?? "", "utf8");
-  } else if (hasDstBefore && hasDstAfter) {
-    targetBefore = Buffer.from(args.dst_before ?? "", "utf8");
-    targetAfter = Buffer.from(args.dst_after ?? "", "utf8");
-  } else if (hasDstBefore) {
-    if (args.insert !== undefined && args.insert !== "before") {
-      fail("invalid_move_args", "insert=after conflicts with dst_before");
-    }
-    targetBefore = empty;
-    targetAfter = Buffer.from(args.dst_before ?? "", "utf8");
-    if (targetAfter.length === 0) {
-      fail("invalid_move_args", "move requires a non-empty dst_before");
-    }
-  } else {
-    if (args.insert !== undefined && args.insert !== "after") {
-      fail("invalid_move_args", "insert=before conflicts with dst_after");
-    }
-    targetBefore = Buffer.from(args.dst_after ?? "", "utf8");
-    targetAfter = empty;
-    if (targetBefore.length === 0) {
-      fail("invalid_move_args", "move requires a non-empty dst_after");
-    }
-  }
+  const targetBefore = Buffer.from(args.target_before ?? "", "utf8");
+  const targetAfter = Buffer.from(args.target_after ?? "", "utf8");
 
   if (targetBefore.length === 0 && targetAfter.length === 0) {
     fail("invalid_move_args", "move requires non-empty target context");
@@ -253,15 +204,15 @@ function renderMovePatch(
 
   return [
     `diff --blockpatch a/${args.src} b/${args.dst}`,
-    "blockpatch version 0",
+    "blockpatch version 1",
     `blockpatch move id=${id} payload-sha256=${payloadSha256}`,
     `--- a/${args.src}`,
     `+++ b/${args.dst}`,
     "",
-    `@@ blockpatch-source ${id} -${sourceOldStart},${sourceOldCount} +${sourceNewStart},${sourceNewCount} @@`,
+    `@@ -${sourceOldStart},${sourceOldCount} +${sourceNewStart},${sourceNewCount} @@ blockpatch-source id=${id}`,
     sourceBody,
     "",
-    `@@ blockpatch-target ${id} -${targetOldStart},${targetOldCount} +${targetNewStart},${targetNewCount} @@`,
+    `@@ -${targetOldStart},${targetOldCount} +${targetNewStart},${targetNewCount} @@ blockpatch-target id=${id}`,
     targetBody
   ].join("\n");
 }

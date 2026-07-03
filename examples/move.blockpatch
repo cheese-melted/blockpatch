@@ -1,10 +1,10 @@
 diff --blockpatch a/src/example.ts b/src/example.ts
-blockpatch version 0
+blockpatch version 1
 blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988ea43f0f3b0c47228f9dba6b3d
 --- a/src/example.ts
 +++ b/src/example.ts
 
-@@ blockpatch-source move-1 -1,8 +1,4 @@ function movedThing
+@@ -1,8 +1,4 @@ blockpatch-source id=move-1 function movedThing
  function alpha() {
  }
 -
@@ -14,7 +14,7 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
  function omega() {
  }
 
-@@ blockpatch-target move-1 -40,3 +36,7 @@ constructor
+@@ -40,3 +36,7 @@ blockpatch-target id=move-1 constructor
    constructor() {
    }
 +
