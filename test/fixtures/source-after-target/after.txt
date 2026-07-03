@@ -1,0 +1,5 @@
+target
+move me
+alpha
+omega
+end

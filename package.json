@@ -1,0 +1,36 @@
+{
+  "name": "blockpatch",
+  "version": "0.2.0",
+  "description": "Anchored text block relocation patches",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "blockpatch": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "build": "bun build ./src/cli.ts ./src/index.ts --target=node --outdir=dist && tsc -p tsconfig.build.json",
+    "prepublishOnly": "bun test && bun run build",
+    "publish:dry": "npm publish --dry-run"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
