@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { BlockPatchError } from "./errors";
 import { applyPatchBytes, applyPatchFile, checkPatchBytes, checkPatchFile } from "./engine";
@@ -8,6 +9,8 @@ import type { ApplyResult, MoveBlockArgs, MoveBlockResult } from "./types";
 
 type Command = "apply" | "check" | "move" | "help" | "version";
 
+const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
+
 interface CliOptions {
   command: Command;
   patchPath?: string;
@@ -15,6 +18,7 @@ interface CliOptions {
   dryRun: boolean;
   diff: boolean;
   jsonOutput: boolean;
+  stripComponents: number;
   moveArgs?: MoveBlockArgs;
   moveJsonPath?: string;
 }
@@ -28,7 +32,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (options.command === "version") {
-    writeSuccess(options, { version: "0.3.0" });
+    writeSuccess(options, { version: packageJson.version });
     return 0;
   }
 
@@ -49,10 +53,6 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  if (options.patchPath === undefined) {
-    throw new BlockPatchError("missing_patch", "Missing patch file path");
-  }
-
   const result = await runPatchCommand(options);
   const verb = options.command === "check" || options.dryRun ? "would change" : "changed";
   writeChangeResult(options, result, verb);
@@ -60,20 +60,31 @@ async function main(argv: string[]): Promise<number> {
 }
 
 async function runPatchCommand(options: CliOptions): Promise<ApplyResult> {
-  const patchPath = options.patchPath;
-  if (patchPath === undefined) {
-    throw new BlockPatchError("missing_patch", "Missing patch file path");
-  }
+  const patchPath = options.patchPath ?? "-";
 
   if (options.command === "check") {
     return patchPath === "-"
-      ? checkPatchBytes(await readStdin(), { cwd: options.cwd })
-      : checkPatchFile(patchPath, { cwd: options.cwd });
+      ? checkPatchBytes(await readStdin(), {
+          cwd: options.cwd,
+          stripComponents: options.stripComponents
+        })
+      : checkPatchFile(patchPath, {
+          cwd: options.cwd,
+          stripComponents: options.stripComponents
+        });
   }
 
   return patchPath === "-"
-    ? applyPatchBytes(await readStdin(), { cwd: options.cwd, dryRun: options.dryRun })
-    : applyPatchFile(patchPath, { cwd: options.cwd, dryRun: options.dryRun });
+    ? applyPatchBytes(await readStdin(), {
+        cwd: options.cwd,
+        dryRun: options.dryRun,
+        stripComponents: options.stripComponents
+      })
+    : applyPatchFile(patchPath, {
+        cwd: options.cwd,
+        dryRun: options.dryRun,
+        stripComponents: options.stripComponents
+      });
 }
 
 async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
@@ -131,21 +142,35 @@ function parsePatchArgs(command: "apply" | "check", args: string[], jsonOutput: 
       options.dryRun = true;
       continue;
     }
-    if (arg === "--cwd") {
-      options.cwd = requireValue(args, "--cwd", true);
+    if (arg === "--cwd" || arg === "--directory" || arg === "-d") {
+      options.cwd = requireValue(args, arg, true);
       continue;
     }
     if (arg?.startsWith("--cwd=")) {
       options.cwd = resolve(arg.slice("--cwd=".length));
       continue;
     }
+    if (arg?.startsWith("--directory=")) {
+      options.cwd = resolve(arg.slice("--directory=".length));
+      continue;
+    }
+    if (arg === "-i" || arg === "--input") {
+      setPatchPath(options, requireValue(args, arg, false));
+      continue;
+    }
+    if (arg?.startsWith("--input=")) {
+      setPatchPath(options, arg.slice("--input=".length));
+      continue;
+    }
+    const stripComponents = parseStripOption(arg, args);
+    if (stripComponents !== undefined) {
+      options.stripComponents = stripComponents;
+      continue;
+    }
     if (arg?.startsWith("-") && arg !== "-") {
       throw new BlockPatchError("unknown_option", `Unknown option: ${arg}`);
     }
-    if (options.patchPath !== undefined) {
-      throw new BlockPatchError("too_many_args", `Unexpected argument: ${arg}`);
-    }
-    options.patchPath = arg;
+    setPatchPath(options, arg ?? "");
   }
 
   if (command === "check" && options.dryRun) {
@@ -170,12 +195,16 @@ function parseMoveArgs(args: string[], jsonOutput: boolean): CliOptions {
       options.diff = true;
       continue;
     }
-    if (arg === "--cwd") {
-      options.cwd = requireValue(args, "--cwd", true);
+    if (arg === "--cwd" || arg === "--directory" || arg === "-d") {
+      options.cwd = requireValue(args, arg, true);
       continue;
     }
     if (arg?.startsWith("--cwd=")) {
       options.cwd = resolve(arg.slice("--cwd=".length));
+      continue;
+    }
+    if (arg?.startsWith("--directory=")) {
+      options.cwd = resolve(arg.slice("--directory=".length));
       continue;
     }
     if (arg === "--json") {
@@ -222,6 +251,10 @@ function argToMoveKey(arg: string | undefined): keyof MoveBlockArgs | undefined 
       return "dst_before";
     case "--dst-after":
       return "dst_after";
+    case "--target-before":
+      return "target_before";
+    case "--target-after":
+      return "target_after";
     case "--insert":
       return "insert";
     default:
@@ -235,8 +268,40 @@ function base(command: Command, jsonOutput: boolean): CliOptions {
     cwd: process.cwd(),
     dryRun: false,
     diff: false,
-    jsonOutput
+    jsonOutput,
+    stripComponents: 1
   };
+}
+
+function setPatchPath(options: CliOptions, path: string): void {
+  if (options.patchPath !== undefined) {
+    throw new BlockPatchError("too_many_args", `Unexpected argument: ${path}`);
+  }
+  options.patchPath = path;
+}
+
+function parseStripOption(arg: string | undefined, args: string[]): number | undefined {
+  if (arg === "-p" || arg === "--strip") {
+    return parseStripComponents(requireValue(args, arg, false), arg);
+  }
+  if (arg?.startsWith("-p") === true && arg.length > 2) {
+    return parseStripComponents(arg.slice(2), "-p");
+  }
+  if (arg?.startsWith("--strip=") === true) {
+    return parseStripComponents(arg.slice("--strip=".length), "--strip");
+  }
+  return undefined;
+}
+
+function parseStripComponents(value: string, option: string): number {
+  if (!/^\d+$/.test(value)) {
+    throw new BlockPatchError("invalid_option", `Invalid strip count for ${option}: ${value}`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new BlockPatchError("invalid_option", `Invalid strip count for ${option}: ${value}`);
+  }
+  return parsed;
 }
 
 function takeFlag(args: string[], flag: string): boolean {
@@ -277,6 +342,12 @@ function writeChangeResult(
   for (const path of result.changed) {
     console.log(`${verb} ${path}`);
   }
+
+  if (result.changed.length === 0) {
+    for (const path of result.affected) {
+      console.log(`unchanged ${path}`);
+    }
+  }
 }
 
 function writeSuccess(options: CliOptions, result: unknown, plainText?: string): void {
@@ -303,10 +374,10 @@ function printHelp(): void {
   console.log(`blockpatch
 
 Usage:
-  blockpatch check <patch.blockpatch|-> [--cwd <dir>] [--json-output]
-  blockpatch apply <patch.blockpatch|-> [--cwd <dir>] [--dry-run] [--json-output]
+  blockpatch check [patch.blockpatch|-] [-d <dir>] [-pN] [--json-output]
+  blockpatch apply [patch.blockpatch|-] [-i <patch.blockpatch>] [-d <dir>] [-pN] [--dry-run] [--json-output]
   blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--json-output]
-  blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --dst-after <text>
+  blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --target-before <text> --target-after <text>
   blockpatch version
 `);
 }
@@ -318,7 +389,7 @@ main(process.argv.slice(2)).then(
   (error: unknown) => {
     const jsonOutput = process.argv.includes("--json-output");
     if (error instanceof BlockPatchError) {
-      writeError(error.code, error.message, jsonOutput);
+      writeError(error.code, error.message, jsonOutput, error.details);
       process.exitCode = 1;
       return;
     }
@@ -329,9 +400,14 @@ main(process.argv.slice(2)).then(
   }
 );
 
-function writeError(code: string, message: string, jsonOutput: boolean): void {
+function writeError(
+  code: string,
+  message: string,
+  jsonOutput: boolean,
+  details: BlockPatchError["details"] = {}
+): void {
   if (jsonOutput) {
-    console.error(JSON.stringify({ ok: false, error: { code, message } }));
+    console.error(JSON.stringify({ ok: false, error: { code, message, ...details } }));
     return;
   }
   console.error(`blockpatch: ${message}`);

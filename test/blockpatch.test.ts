@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -81,6 +82,16 @@ describe("blockpatch v0 golden fixtures", () => {
     const result = await checkPatchFile("patch.blockpatch", { cwd });
     const after = await readFile(join(cwd, "file.txt"));
     expect(result.changed).toEqual(["file.txt"]);
+    expect(result.affected).toEqual(["file.txt"]);
+    expect(result.noop).toBe(false);
+    expect(result.moves).toHaveLength(1);
+    expect(result.moves[0]).toMatchObject({
+      id: "move-1",
+      src: "file.txt",
+      dst: "file.txt",
+      payload_sha256: "f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e",
+      payload_bytes: "move me\n".length
+    });
     expect(after).toEqual(before);
   });
 });
@@ -193,9 +204,13 @@ describe("byte preservation", () => {
         " omega\n"
     );
 
-    await applyPatchFile("patch.blockpatch", { cwd });
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
     const actual = await readFile(join(cwd, "file.txt"), "utf8");
     expect(actual).toBe("alpha\nmove me\nomega\n");
+    expect(result.changed).toEqual([]);
+    expect(result.affected).toEqual(["file.txt"]);
+    expect(result.noop).toBe(true);
+    expect(result.moves[0].source_range).toEqual({ start: "alpha\n".length, end: "alpha\nmove me\n".length });
   });
 
   test("source hunk can start at the beginning of a file", async () => {
@@ -389,6 +404,60 @@ describe("CLI", () => {
     expect(actual).toEqual(expected);
   });
 
+  test("apply reads stdin when no patch path is supplied", async () => {
+    const cwd = await fixtureCase("success");
+    const patch = await readFile(join(cwd, "patch.blockpatch"));
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(patch);
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const actual = await readFile(join(cwd, "file.txt"));
+    const expected = await readFile(join(fixtureRoot, "success", "after.txt"));
+    expect(actual).toEqual(expected);
+  });
+
+  test("supports -i, -d, and -p aliases", async () => {
+    const cwd = await fixtureCase("success");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-i", "patch.blockpatch", "-d", cwd, "-p1"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const actual = await readFile(join(cwd, "file.txt"));
+    const expected = await readFile(join(fixtureRoot, "success", "after.txt"));
+    expect(actual).toEqual(expected);
+  });
+
+  test("-p strips patch-declared path components", async () => {
+    const cwd = await fixtureCase("success");
+    const patch = (await readFile(join(cwd, "patch.blockpatch"), "utf8"))
+      .replaceAll("a/file.txt", "a/nested/file.txt")
+      .replaceAll("b/file.txt", "b/nested/file.txt");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "-d", cwd, "-p2"],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(patch);
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("would change file.txt");
+  });
+
   test("move --json - applies a same-file move", async () => {
     const cwd = await moveFixture();
     const proc = Bun.spawn({
@@ -411,6 +480,98 @@ describe("CLI", () => {
     expect(await new Response(proc.stderr).text()).toBe("");
     const actual = await readFile(join(cwd, "source.ts"), "utf8");
     expect(actual).toBe("alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n");
+  });
+
+  test("move --json accepts two-sided target anchors", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        dst_before: "class Target {\n",
+        dst_after: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const actual = await readFile(join(cwd, "source.ts"), "utf8");
+    expect(actual).toBe("alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n");
+  });
+
+  test("move --json accepts target_before and target_after aliases", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n",
+        target_after: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const actual = await readFile(join(cwd, "source.ts"), "utf8");
+    expect(actual).toBe("alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n");
+  });
+
+  test("move --json-output prints machine-readable success details", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--dry-run", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        dst_before: "class Target {\n",
+        dst_after: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      affected: string[];
+      noop: boolean;
+      moves: Array<{ src: string; dst: string; payload_sha256: string; payload_bytes: number }>;
+    };
+    expect(stdout.ok).toBe(true);
+    expect(stdout.changed).toEqual(["source.ts"]);
+    expect(stdout.affected).toEqual(["source.ts"]);
+    expect(stdout.noop).toBe(false);
+    expect(stdout.moves[0]).toMatchObject({
+      src: "source.ts",
+      dst: "source.ts",
+      payload_sha256: "a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6",
+      payload_bytes: "function movedThing() {\n  return 42;\n}\n".length
+    });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
   test("move --json path supports dry-run", async () => {
@@ -436,6 +597,38 @@ describe("CLI", () => {
     expect(await new Response(proc.stderr).text()).toBe("");
     const after = await readFile(join(cwd, "source.ts"), "utf8");
     expect(after).toBe(before);
+  });
+
+  test("move --json path may be read outside the working directory", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-external-move-json-"));
+    const cwd = join(parent, "repo");
+    await mkdir(cwd);
+    await writeFile(
+      join(cwd, "source.ts"),
+      "alpha\nfunction movedThing() {\n  return 42;\n}\nomega\nclass Target {\n}\n"
+    );
+    const moveJsonPath = join(parent, "move.json");
+    await writeFile(
+      moveJsonPath,
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        dst_after: "class Target {\n"
+      })
+    );
+
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", moveJsonPath, "--cwd", cwd],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
   });
 
   test("move flag mode supports cross-file move", async () => {
@@ -470,6 +663,37 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe("before\nafter\n");
     expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe(
       "class Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
+  });
+
+  test("move flag mode supports target-before and target-after", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--src",
+        "source.ts",
+        "--src-start",
+        "function movedThing() {\n",
+        "--src-end",
+        "}\n",
+        "--target-before",
+        "class Target {\n",
+        "--target-after",
+        "}\n",
+        "--cwd",
+        cwd
+      ],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
     );
   });
 
@@ -602,6 +826,54 @@ describe("CLI", () => {
     expect(stderr.ok).toBe(false);
     expect(stderr.error.code).toBe("invalid_json");
   });
+
+  test("move --json-output includes structured match details", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-json-error-details-"));
+    await writeFile(
+      join(cwd, "source.ts"),
+      "function movedThing() {\n}\nclass Target {\n}\nclass Target {\n}\n"
+    );
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        dst_after: "class Target {\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      ok: boolean;
+      error: { code: string; path: string; matches: number };
+    };
+    expect(stderr.ok).toBe(false);
+    expect(stderr.error).toMatchObject({
+      code: "target_ambiguous",
+      path: "source.ts",
+      matches: 2
+    });
+  });
+
+  test("--unsafe-paths is not a supported escape hatch", async () => {
+    const cwd = await fixtureCase("success");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "patch.blockpatch", "--cwd", cwd, "--unsafe-paths"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    expect(await new Response(proc.stderr).text()).toContain("Unknown option: --unsafe-paths");
+  });
 });
 
 describe("moveBlock API", () => {
@@ -632,7 +904,7 @@ describe("moveBlock API", () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-noop-"));
     await writeFile(join(cwd, "source.ts"), "alpha\nmove me\nomega\ntail\n");
 
-    await moveBlock(
+    const result = await moveBlock(
       {
         src: "source.ts",
         src_start: "move me",
@@ -643,6 +915,294 @@ describe("moveBlock API", () => {
     );
 
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe("alpha\nmove me\nomega\ntail\n");
+    expect(result.changed).toEqual([]);
+    expect(result.affected).toEqual(["source.ts"]);
+    expect(result.noop).toBe(true);
+    expect(result.moves[0]).toMatchObject({
+      id: "move-1",
+      src: "source.ts",
+      dst: "source.ts",
+      payload_sha256: "f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e",
+      payload_bytes: "move me\n".length
+    });
+  });
+
+  test("rejects unknown argument keys", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: "a",
+        src_end: "b",
+        dst_afterr: "c"
+      } as never)
+    ).rejects.toThrow("Unknown move argument: dst_afterr");
+  });
+
+  test("rejects wrongly typed argument values", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: 123,
+        src_end: "b",
+        dst_after: "c"
+      } as never)
+    ).rejects.toThrow("move argument src_start must be a string");
+  });
+
+  test("rejects invalid insert values", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: "a",
+        src_end: "b",
+        dst_after: "c",
+        insert: "around"
+      } as never)
+    ).rejects.toThrow('insert must be "before" or "after"');
+  });
+
+  test("rejects empty target anchors", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: "a",
+        src_end: "b",
+        dst_after: ""
+      })
+    ).rejects.toThrow("move requires a non-empty dst_after");
+  });
+
+  test("rejects incomplete target_before target_after pair", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: "a",
+        src_end: "b",
+        target_before: "c"
+      })
+    ).rejects.toThrow("move requires both target_before and target_after");
+  });
+
+  test("rejects mixed target and dst anchor fields", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: "a",
+        src_end: "b",
+        target_before: "c",
+        target_after: "d",
+        dst_after: "e"
+      })
+    ).rejects.toThrow("cannot combine target_before/target_after with dst_before/dst_after");
+  });
+
+  test("rejects src outside the working directory", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-escape-"));
+    await expect(
+      moveBlock(
+        {
+          src: "../outside.ts",
+          src_start: "a",
+          src_end: "b",
+          dst_after: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("escapes the working directory");
+  });
+
+  test("--diff emits real line-number hints", async () => {
+    const cwd = await moveFixture();
+    const result = await moveBlock(
+      {
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        dst_after: "class Target {\n"
+      },
+      { cwd, diff: true }
+    );
+
+    expect(result.patch).toContain("@@ blockpatch-source move-1 -1,5 +1,2 @@");
+    expect(result.patch).toContain("@@ blockpatch-target move-1 -6,1 +3,4 @@");
+  });
+});
+
+describe("v0 hardening", () => {
+  function patchFor(payload: string, src: string, dst: string, sourceHunk: string, targetHunk: string): string {
+    const sha = createHash("sha256").update(payload).digest("hex");
+    return (
+      `diff --blockpatch a/${src} b/${dst}\n` +
+      "blockpatch version 0\n" +
+      `blockpatch move id=move-1 payload-sha256=${sha}\n` +
+      `--- a/${src}\n` +
+      `+++ b/${dst}\n` +
+      "\n" +
+      sourceHunk +
+      "\n" +
+      targetHunk
+    );
+  }
+
+  test("overlap detection is not bypassed by a dot path", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-dot-path-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "./file.txt",
+        "file.txt",
+        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n alpha\n-move me\n omega\n",
+        "@@ blockpatch-target move-1 -2,1 +2,2 @@\n move me\n+move me\n"
+      )
+    );
+
+    const before = await readFile(join(cwd, "file.txt"));
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("overlaps the source block");
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
+  });
+
+  test("patch paths may not escape the working directory", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-traversal-"));
+    const cwd = join(parent, "repo");
+    await mkdir(cwd);
+    await writeFile(join(parent, "outside.txt"), "safe\nmove me\nomega\nanchor\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "../outside.txt",
+        "../outside.txt",
+        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n safe\n-move me\n omega\n",
+        "@@ blockpatch-target move-1 -4,1 +4,2 @@\n anchor\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("escapes the working directory");
+    expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
+  });
+
+  test("patch files may be read outside the working directory", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-external-patch-"));
+    const cwd = join(parent, "repo");
+    await mkdir(cwd);
+    await writeFile(join(cwd, "file.txt"), "safe\nmove me\nomega\nanchor\n");
+    const patchPath = join(parent, "patch.blockpatch");
+    await writeFile(
+      patchPath,
+      patchFor(
+        "move me\n",
+        "file.txt",
+        "file.txt",
+        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n safe\n-move me\n omega\n",
+        "@@ blockpatch-target move-1 -4,1 +4,2 @@\n anchor\n+move me\n"
+      )
+    );
+
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "apply",
+        patchPath,
+        "--cwd",
+        cwd,
+        "--json-output"
+      ],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as { changed: string[] };
+    expect(stdout.changed).toEqual(["file.txt"]);
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("safe\nomega\nanchor\nmove me\n");
+  });
+
+  test("diff header paths must match the file headers", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-header-mismatch-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    const patch = patchFor(
+      "move me\n",
+      "file.txt",
+      "file.txt",
+      "@@ blockpatch-source move-1 -1,3 +1,2 @@\n alpha\n-move me\n omega\n",
+      "@@ blockpatch-target move-1 -4,1 +4,2 @@\n target\n+move me\n"
+    ).replace("diff --blockpatch a/file.txt b/file.txt", "diff --blockpatch a/other.txt b/other.txt");
+    await writeFile(join(cwd, "patch.blockpatch"), patch);
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must match the --- and +++ headers"
+    );
+  });
+
+  test("blank lines inside a hunk body are rejected", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-blank-line-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "file.txt",
+        "file.txt",
+        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n alpha\n\n-move me\n omega\n",
+        "@@ blockpatch-target move-1 -4,1 +4,2 @@\n target\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain blank lines"
+    );
+  });
+
+  test.skipIf(process.getuid?.() === 0)(
+    "interrupted cross-file move duplicates the payload instead of losing it",
+    async () => {
+      const cwd = await mkdtemp(join(tmpdir(), "blockpatch-interrupted-"));
+      await mkdir(join(cwd, "locked"));
+      await writeFile(join(cwd, "locked", "source.ts"), "before\nfunction movedThing() {\n}\nafter\n");
+      await writeFile(join(cwd, "target.ts"), "class Target {\n}\n");
+      await chmod(join(cwd, "locked"), 0o555);
+
+      try {
+        await expect(
+          moveBlock(
+            {
+              src: "locked/source.ts",
+              src_start: "function movedThing() {\n",
+              src_end: "}\n",
+              dst: "target.ts",
+              dst_after: "class Target {\n"
+            },
+            { cwd }
+          )
+        ).rejects.toThrow();
+
+        const source = await readFile(join(cwd, "locked", "source.ts"), "utf8");
+        const target = await readFile(join(cwd, "target.ts"), "utf8");
+        expect(source).toContain("function movedThing()");
+        expect(target).toContain("function movedThing()");
+      } finally {
+        await chmod(join(cwd, "locked"), 0o755);
+      }
+    }
+  );
+
+  test("version output matches package.json", async () => {
+    const pkg = JSON.parse(await readFile(join(import.meta.dir, "../package.json"), "utf8")) as {
+      version: string;
+    };
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "version", "--json-output"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as { ok: boolean; version: string };
+    expect(stdout.version).toBe(pkg.version);
   });
 });
 

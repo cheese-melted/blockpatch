@@ -23,9 +23,12 @@ const movePrefix = "blockpatch move ";
 const hunkPattern =
   /^@@ blockpatch-(source|target) ([^\s]+) -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?$/;
 
-export function parseBlockPatch(input: Buffer): BlockPatch {
+export function parseBlockPatch(
+  input: Buffer,
+  options: { stripComponents?: number } = {}
+): BlockPatch {
   const lines = splitLines(input);
-  const header = parseHeader(lines);
+  const header = parseHeader(lines, normalizeStripComponents(options.stripComponents ?? 1));
   const hunks = parseHunks(lines, header.hunkStart);
 
   if (hunks.length !== 2) {
@@ -68,7 +71,10 @@ export function parseBlockPatch(input: Buffer): BlockPatch {
   };
 }
 
-function parseHeader(lines: PatchLine[]): {
+function parseHeader(
+  lines: PatchLine[],
+  stripComponents: number
+): {
   src: string;
   dst: string;
   moveId: string;
@@ -98,15 +104,32 @@ function parseHeader(lines: PatchLine[]): {
     fail("parse_error", "blockpatch move metadata must include payload-sha256=<64 hex chars>");
   }
 
-  const oldPath = parseFileHeader(text(lines[3]), "---", "old file");
-  const newPath = parseFileHeader(text(lines[4]), "+++", "new file");
+  const oldRawPath = parseFileHeader(text(lines[3]), "---", "a/");
+  const newRawPath = parseFileHeader(text(lines[4]), "+++", "b/");
+
+  if (text(lines[0])?.trimEnd() !== `diff --blockpatch ${oldRawPath} ${newRawPath}`) {
+    fail("parse_error", "diff --blockpatch paths must match the --- and +++ headers");
+  }
 
   let hunkStart = 5;
   while (hunkStart < lines.length && text(lines[hunkStart]) === "") {
     hunkStart += 1;
   }
 
-  return { src: oldPath, dst: newPath, moveId, payloadSha256, hunkStart };
+  return {
+    src: stripPath(oldRawPath, stripComponents),
+    dst: stripPath(newRawPath, stripComponents),
+    moveId,
+    payloadSha256,
+    hunkStart
+  };
+}
+
+function normalizeStripComponents(value: number): number {
+  if (!Number.isInteger(value) || value < 0) {
+    fail("parse_error", "stripComponents must be a non-negative integer");
+  }
+  return value;
 }
 
 function parseHunks(lines: PatchLine[], start: number): Hunk[] {
@@ -140,8 +163,17 @@ function parseHunks(lines: PatchLine[], start: number): Hunk[] {
 
       const body = lines[index].body;
       if (body.length === 0) {
-        index += 1;
-        continue;
+        let lookahead = index + 1;
+        while (lookahead < lines.length && lines[lookahead].body.length === 0) {
+          lookahead += 1;
+        }
+        if (lookahead < lines.length && text(lines[lookahead])?.startsWith("@@ blockpatch-") !== true) {
+          fail(
+            "parse_error",
+            "Hunk bodies must not contain blank lines; encode an empty context line as a single space"
+          );
+        }
+        break;
       }
 
       const first = body[0];
@@ -253,18 +285,30 @@ function parseMetadata(input: string): Map<string, string> {
   return metadata;
 }
 
-function parseFileHeader(line: string | undefined, prefix: "---" | "+++", label: string): string {
-  if (line?.startsWith(`${prefix} `) !== true) {
-    fail("parse_error", `Patch must include ${prefix} ${label} header`);
+function parseFileHeader(
+  line: string | undefined,
+  prefix: "---" | "+++",
+  requiredPathPrefix: "a/" | "b/"
+): string {
+  const marker = `${prefix} `;
+  if (line?.startsWith(`${marker}${requiredPathPrefix}`) !== true) {
+    fail("parse_error", `Patch must include a ${marker}${requiredPathPrefix}<path> header`);
   }
 
-  const path = line.slice(4).trim();
-  const normalized = path.replace(/^[ab]\//, "");
-  if (!normalized) {
+  const path = line.slice(marker.length).trim();
+  if (!path || path === requiredPathPrefix) {
     fail("parse_error", `${prefix} file header must include a path`);
   }
 
-  return normalized;
+  return path;
+}
+
+function stripPath(path: string, stripComponents: number): string {
+  const stripped = path.split("/").slice(stripComponents).join("/");
+  if (!stripped) {
+    fail("parse_error", `-p${stripComponents} removes the entire path: ${path}`);
+  }
+  return stripped;
 }
 
 function splitLines(input: Buffer): PatchLine[] {

@@ -4,7 +4,7 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
 --- a/src/example.ts
 +++ b/src/example.ts
 
-@@ blockpatch-source move-1 -1,7 +1,3 @@ function movedThing
+@@ blockpatch-source move-1 -1,8 +1,4 @@ function movedThing
  function alpha() {
  }
 -
@@ -14,10 +14,11 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
  function omega() {
  }
 
-@@ blockpatch-target move-1 -10,2 +10,6 @@ constructor
+@@ blockpatch-target move-1 -40,3 +36,7 @@ constructor
    constructor() {
    }
 +
 +function movedThing() {
 +  console.log("keep me exact");
 +}
+   methodAfter() {

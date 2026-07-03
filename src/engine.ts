@@ -3,22 +3,35 @@ import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promis
 import { basename, dirname, join, resolve } from "node:path";
 import { fail } from "./errors";
 import { parseBlockPatch } from "./parser";
-import type { ApplyOptions, ApplyResult, BlockPatch } from "./types";
+import { resolvePath } from "./paths";
+import type { ApplyOptions, ApplyResult, BlockPatch, MoveResultDetails } from "./types";
 
 export interface ByteRange {
   start: number;
   end: number;
 }
 
-interface TargetSelection {
+export interface TargetSelection {
   range: ByteRange;
   insertIndex: number;
 }
 
-interface MoveSelection {
+export interface MoveSelection {
   source: ByteRange;
   target: TargetSelection;
   payload: Buffer;
+}
+
+export interface CommitMoveArgs {
+  srcPath: string;
+  dstPath: string;
+  sameFile: boolean;
+  dryRun: boolean;
+  srcOriginal: Buffer;
+  dstOriginal: Buffer;
+  selection: MoveSelection;
+  srcLabel: string;
+  dstLabel: string;
 }
 
 export async function checkPatchFile(
@@ -50,53 +63,78 @@ export async function applyPatchBytes(
 }
 
 async function runPatchFile(patchPath: string, options: ApplyOptions): Promise<ApplyResult> {
-  const cwd = options.cwd ?? process.cwd();
+  const cwd = resolve(options.cwd ?? process.cwd());
   const patchBytes = await readFile(resolve(cwd, patchPath));
-  return runPatchBytes(patchBytes, options);
+  return runPatchBytes(patchBytes, { ...options, cwd });
 }
 
 async function runPatchBytes(patchBytes: Buffer, options: ApplyOptions): Promise<ApplyResult> {
-  const cwd = options.cwd ?? process.cwd();
-  const patch = parseBlockPatch(patchBytes);
-  const changed = await applyMovePatch(patch, cwd, options.dryRun ?? false);
-  return { changed };
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const patch = parseBlockPatch(patchBytes, { stripComponents: options.stripComponents });
+  return applyMovePatch(patch, cwd, options.dryRun ?? false);
 }
 
-async function applyMovePatch(patch: BlockPatch, cwd: string, dryRun: boolean): Promise<string[]> {
-  const srcPath = resolve(cwd, patch.src);
-  const dstPath = resolve(cwd, patch.dst);
+async function applyMovePatch(
+  patch: BlockPatch,
+  cwd: string,
+  dryRun: boolean
+): Promise<ApplyResult> {
+  const srcPath = resolvePath(cwd, patch.src, "source path");
+  const dstPath = resolvePath(cwd, patch.dst, "destination path");
   const sameFile = srcPath === dstPath;
   const srcOriginal = await readFile(srcPath);
   const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
-  const selection = selectMove(srcOriginal, dstOriginal, patch);
-  const next = sameFile
-    ? applyMove(srcOriginal, selection)
-    : applyCrossFileMove(srcOriginal, dstOriginal, selection);
+  const selection = selectMove(srcOriginal, dstOriginal, patch, sameFile);
+  const changed = await commitMove({
+    srcPath,
+    dstPath,
+    sameFile,
+    dryRun,
+    srcOriginal,
+    dstOriginal,
+    selection,
+    srcLabel: patch.src,
+    dstLabel: patch.dst
+  });
 
-  if (!dryRun) {
-    if (sameFile) {
-      if (!next.src.equals(srcOriginal)) {
-        await writeAtomic(srcPath, next.src);
-      }
-    } else {
-      if (!next.src.equals(srcOriginal)) {
-        await writeAtomic(srcPath, next.src);
-      }
-      if (!next.dst.equals(dstOriginal)) {
-        await writeAtomic(dstPath, next.dst);
-      }
-    }
-  }
-
-  return [...new Set([patch.src, patch.dst])];
+  return {
+    changed,
+    affected: unique([patch.src, patch.dst]),
+    noop: changed.length === 0,
+    moves: [
+      moveResultDetails({
+        id: patch.id,
+        src: patch.src,
+        dst: patch.dst,
+        payloadSha256: patch.payloadSha256,
+        selection
+      })
+    ]
+  };
 }
 
-export function selectMove(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): MoveSelection {
+export function selectMove(
+  srcFile: Buffer,
+  dstFile: Buffer,
+  patch: BlockPatch,
+  sameFile: boolean
+): MoveSelection {
   const source = findSourceRange(srcFile, patch);
-  const target = findTarget(dstFile, patch);
+  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, patch.dst);
+  return buildMoveSelection(srcFile, source, target, sameFile, patch.dst);
+}
 
-  if (patch.src === patch.dst && rangesOverlap(source, target.range)) {
-    fail("target_overlaps_source", `Target anchor for ${patch.dst} overlaps the source block`);
+export function buildMoveSelection(
+  srcFile: Buffer,
+  source: ByteRange,
+  target: TargetSelection,
+  sameFile: boolean,
+  dstLabel: string
+): MoveSelection {
+  if (sameFile && rangesOverlap(source, target.range)) {
+    fail("target_overlaps_source", `Target anchor for ${dstLabel} overlaps the source block`, {
+      path: dstLabel
+    });
   }
 
   return {
@@ -104,6 +142,34 @@ export function selectMove(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch):
     target,
     payload: Buffer.from(srcFile.subarray(source.start, source.end))
   };
+}
+
+export async function commitMove(args: CommitMoveArgs): Promise<string[]> {
+  const next = args.sameFile
+    ? applyMove(args.srcOriginal, args.selection)
+    : applyCrossFileMove(args.srcOriginal, args.dstOriginal, args.selection);
+  const srcChanged = !next.src.equals(args.srcOriginal);
+  const dstChanged = !args.sameFile && !next.dst.equals(args.dstOriginal);
+
+  if (!args.dryRun) {
+    // Destination before source: an interrupted cross-file move can leave the
+    // payload duplicated in both files, never deleted from both.
+    if (dstChanged) {
+      await writeAtomic(args.dstPath, next.dst);
+    }
+    if (srcChanged) {
+      await writeAtomic(args.srcPath, next.src);
+    }
+  }
+
+  const changed: string[] = [];
+  if (srcChanged) {
+    changed.push(args.srcLabel);
+  }
+  if (dstChanged) {
+    changed.push(args.dstLabel);
+  }
+  return changed;
 }
 
 export function applyMove(file: Buffer, selection: MoveSelection): { src: Buffer; dst: Buffer } {
@@ -124,7 +190,7 @@ export function applyMove(file: Buffer, selection: MoveSelection): { src: Buffer
   return { src: next, dst: next };
 }
 
-function applyCrossFileMove(
+export function applyCrossFileMove(
   srcFile: Buffer,
   dstFile: Buffer,
   selection: MoveSelection
@@ -149,19 +215,27 @@ function findSourceRange(file: Buffer, patch: BlockPatch): ByteRange {
   }
 
   if (fullMatches.length > 1) {
-    fail("source_ambiguous", `Source block is ambiguous in ${patch.src}; matched ${fullMatches.length} locations`);
+    fail("source_ambiguous", `Source block is ambiguous in ${patch.src}; matched ${fullMatches.length} locations`, {
+      path: patch.src,
+      matches: fullMatches.length
+    });
   }
 
   const envelopes = findSourceEnvelopes(file, patch);
   if (envelopes.length === 1) {
-    fail("payload_mismatch", `Source payload does not match located source anchors in ${patch.src}`);
+    fail("payload_mismatch", `Source payload does not match located source anchors in ${patch.src}`, {
+      path: patch.src
+    });
   }
 
   if (envelopes.length > 1) {
-    fail("source_ambiguous", `Source anchors are ambiguous in ${patch.src}; matched ${envelopes.length} locations`);
+    fail("source_ambiguous", `Source anchors are ambiguous in ${patch.src}; matched ${envelopes.length} locations`, {
+      path: patch.src,
+      matches: envelopes.length
+    });
   }
 
-  fail("source_not_found", `Source anchors were not found in ${patch.src}`);
+  fail("source_not_found", `Source anchors were not found in ${patch.src}`, { path: patch.src, matches: 0 });
 }
 
 function findSourceEnvelopes(file: Buffer, patch: BlockPatch): ByteRange[] {
@@ -180,35 +254,31 @@ function findSourceEnvelopes(file: Buffer, patch: BlockPatch): ByteRange[] {
   return ranges;
 }
 
-function findTarget(file: Buffer, patch: BlockPatch): TargetSelection {
-  const target = targetContext(patch.target);
-  const anchor = Buffer.concat([target.before, target.after]);
+export function findTargetSelection(
+  file: Buffer,
+  before: Buffer,
+  after: Buffer,
+  dstLabel: string
+): TargetSelection {
+  const anchor = Buffer.concat([before, after]);
   const matches = indexesOf(file, anchor);
 
   if (matches.length === 0) {
-    fail("target_not_found", `Target anchor was not found in ${patch.dst}`);
+    fail("target_not_found", `Target anchor was not found in ${dstLabel}`, { path: dstLabel, matches: 0 });
   }
 
   if (matches.length > 1) {
-    fail("target_ambiguous", `Target anchor is ambiguous in ${patch.dst}; matched ${matches.length} locations`);
+    fail("target_ambiguous", `Target anchor is ambiguous in ${dstLabel}; matched ${matches.length} locations`, {
+      path: dstLabel,
+      matches: matches.length
+    });
   }
 
   const start = matches[0];
-  const end = start + anchor.length;
   return {
-    range: { start, end },
-    insertIndex: start + target.before.length
+    range: { start, end: start + anchor.length },
+    insertIndex: start + before.length
   };
-}
-
-function targetContext(target: BlockPatch["target"]): { before: Buffer; after: Buffer } {
-  if ("anchor" in target) {
-    return target.kind === "before"
-      ? { before: Buffer.alloc(0), after: target.anchor }
-      : { before: target.anchor, after: Buffer.alloc(0) };
-  }
-
-  return target;
 }
 
 export function indexesOf(haystack: Buffer, needle: Buffer): number[] {
@@ -228,6 +298,29 @@ export function indexesOf(haystack: Buffer, needle: Buffer): number[] {
 
 export function rangesOverlap(left: ByteRange, right: ByteRange): boolean {
   return left.start < right.end && right.start < left.end;
+}
+
+export function moveResultDetails(args: {
+  id: string;
+  src: string;
+  dst: string;
+  payloadSha256: string;
+  selection: MoveSelection;
+}): MoveResultDetails {
+  return {
+    id: args.id,
+    src: args.src,
+    dst: args.dst,
+    payload_sha256: args.payloadSha256,
+    payload_bytes: args.selection.payload.length,
+    source_range: args.selection.source,
+    target_range: args.selection.target.range,
+    insert_index: args.selection.target.insertIndex
+  };
+}
+
+export function unique(paths: string[]): string[] {
+  return [...new Set(paths)];
 }
 
 export async function writeAtomic(path: string, bytes: Buffer): Promise<void> {
