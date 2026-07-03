@@ -172,6 +172,137 @@ describe("byte preservation", () => {
     expect(after).toEqual(before);
   });
 
+  test("move to immediately before an anchor that follows the source is a no-op", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-noop-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      "diff --blockpatch a/file.txt b/file.txt\n" +
+        "blockpatch version 0\n" +
+        "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
+        "--- a/file.txt\n" +
+        "+++ b/file.txt\n" +
+        "\n" +
+        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+        " alpha\n" +
+        "-move me\n" +
+        " omega\n" +
+        "\n" +
+        "@@ blockpatch-target move-1 -3,1 +2,2 @@\n" +
+        "+move me\n" +
+        " omega\n"
+    );
+
+    await applyPatchFile("patch.blockpatch", { cwd });
+    const actual = await readFile(join(cwd, "file.txt"), "utf8");
+    expect(actual).toBe("alpha\nmove me\nomega\n");
+  });
+
+  test("source hunk can start at the beginning of a file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-source-start-"));
+    await writeFile(join(cwd, "file.txt"), "move me\nomega\ntarget\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      "diff --blockpatch a/file.txt b/file.txt\n" +
+        "blockpatch version 0\n" +
+        "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
+        "--- a/file.txt\n" +
+        "+++ b/file.txt\n" +
+        "\n" +
+        "@@ blockpatch-source move-1 -1,2 +1,1 @@\n" +
+        "-move me\n" +
+        " omega\n" +
+        "\n" +
+        "@@ blockpatch-target move-1 -3,1 +3,2 @@\n" +
+        " target\n" +
+        "+move me\n"
+    );
+
+    await applyPatchFile("patch.blockpatch", { cwd });
+    const actual = await readFile(join(cwd, "file.txt"), "utf8");
+    expect(actual).toBe("omega\ntarget\nmove me\n");
+  });
+
+  test("source hunk can end at the end of a file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-source-end-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\ntarget\nmove me\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      "diff --blockpatch a/file.txt b/file.txt\n" +
+        "blockpatch version 0\n" +
+        "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
+        "--- a/file.txt\n" +
+        "+++ b/file.txt\n" +
+        "\n" +
+        "@@ blockpatch-source move-1 -2,2 +2,1 @@\n" +
+        " target\n" +
+        "-move me\n" +
+        "\n" +
+        "@@ blockpatch-target move-1 -1,1 +1,2 @@\n" +
+        " alpha\n" +
+        "+move me\n"
+    );
+
+    await applyPatchFile("patch.blockpatch", { cwd });
+    const actual = await readFile(join(cwd, "file.txt"), "utf8");
+    expect(actual).toBe("alpha\nmove me\ntarget\n");
+  });
+
+  test("target hunk can use context before and after the insertion", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-target-both-sides-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\ntail\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      "diff --blockpatch a/file.txt b/file.txt\n" +
+        "blockpatch version 0\n" +
+        "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
+        "--- a/file.txt\n" +
+        "+++ b/file.txt\n" +
+        "\n" +
+        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+        " alpha\n" +
+        "-move me\n" +
+        " omega\n" +
+        "\n" +
+        "@@ blockpatch-target move-1 -4,2 +4,3 @@\n" +
+        " target\n" +
+        "+move me\n" +
+        " tail\n"
+    );
+
+    await applyPatchFile("patch.blockpatch", { cwd });
+    const actual = await readFile(join(cwd, "file.txt"), "utf8");
+    expect(actual).toBe("alpha\nomega\ntarget\nmove me\ntail\n");
+  });
+
+  test("target hunk context after the insertion is verified", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-target-after-context-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\nactual-tail\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      "diff --blockpatch a/file.txt b/file.txt\n" +
+        "blockpatch version 0\n" +
+        "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
+        "--- a/file.txt\n" +
+        "+++ b/file.txt\n" +
+        "\n" +
+        "@@ blockpatch-source move-1 -1,3 +1,2 @@\n" +
+        " alpha\n" +
+        "-move me\n" +
+        " omega\n" +
+        "\n" +
+        "@@ blockpatch-target move-1 -4,2 +4,3 @@\n" +
+        " target\n" +
+        "+move me\n" +
+        " expected-tail\n"
+    );
+
+    const before = await readFile(join(cwd, "file.txt"));
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("Target anchor");
+    const after = await readFile(join(cwd, "file.txt"));
+    expect(after).toEqual(before);
+  });
+
   test("payload hash mismatch", async () => {
     const cwd = await fixtureCase("success");
     const before = await readFile(join(cwd, "file.txt"));
@@ -418,6 +549,40 @@ describe("CLI", () => {
     );
   });
 
+  test("move --diff output applies when the source starts at the file boundary", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-diff-source-boundary-"));
+    await writeFile(join(cwd, "source.ts"), "function movedThing() {\n  return 42;\n}\nalpha\nclass Target {\n}\n");
+
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--src",
+        "source.ts",
+        "--src-start",
+        "function movedThing() {\n",
+        "--src-end",
+        "}\n",
+        "--dst-after",
+        "class Target {\n",
+        "--diff",
+        "--cwd",
+        cwd
+      ],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    await writeFile(join(cwd, "generated.blockpatch"), await new Response(proc.stdout).text());
+    await applyPatchFile("generated.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
+  });
+
   test("move --json-output prints machine-readable errors", async () => {
     const cwd = await moveFixture();
     const proc = Bun.spawn({
@@ -461,6 +626,23 @@ describe("moveBlock API", () => {
     ).rejects.toThrow("ambiguous");
 
     expect(await readFile(join(cwd, "source.ts"))).toEqual(before);
+  });
+
+  test("move to immediately before an anchor that follows the source is a no-op", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-noop-"));
+    await writeFile(join(cwd, "source.ts"), "alpha\nmove me\nomega\ntail\n");
+
+    await moveBlock(
+      {
+        src: "source.ts",
+        src_start: "move me",
+        src_end: "\n",
+        dst_before: "omega\n"
+      },
+      { cwd }
+    );
+
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe("alpha\nmove me\nomega\ntail\n");
   });
 });
 

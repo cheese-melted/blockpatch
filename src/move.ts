@@ -134,7 +134,7 @@ function applySameFileMove(
   payload: Buffer
 ): { src: Buffer; dst: Buffer } {
   const withoutSource = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
-  const insertIndex = target.insertIndex > source.end ? target.insertIndex - payload.length : target.insertIndex;
+  const insertIndex = target.insertIndex >= source.end ? target.insertIndex - payload.length : target.insertIndex;
   const next = Buffer.concat([
     withoutSource.subarray(0, insertIndex),
     payload,
@@ -171,6 +171,11 @@ function renderMovePatch(
   const sourceBefore = adjacentLineBefore(srcOriginal, source.start);
   const sourceAfter = adjacentLineAfter(srcOriginal, source.end);
   const sourceLines = renderHunkBytes(payload, "-");
+  const sourceBody = joinPatchChunks([
+    renderHunkBytes(sourceBefore, " "),
+    sourceLines,
+    renderHunkBytes(sourceAfter, " ")
+  ]);
   const targetLines = renderHunkBytes(payload, "+");
   const targetContext = renderHunkBytes(args.targetAnchor, " ");
   const targetBody =
@@ -186,9 +191,7 @@ function renderMovePatch(
     `+++ b/${args.dst}`,
     "",
     `@@ blockpatch-source ${id} -0,0 +0,0 @@`,
-    renderHunkBytes(sourceBefore, " "),
-    sourceLines,
-    renderHunkBytes(sourceAfter, " "),
+    sourceBody,
     "",
     `@@ blockpatch-target ${id} -0,0 +0,0 @@`,
     targetBody

@@ -32,7 +32,7 @@ blockpatch apply patch.blockpatch --dry-run
 blockpatch apply - < patch.blockpatch
 blockpatch move --json -
 blockpatch move --json move.json
-blockpatch move --src src/foo.ts --src-start 'function movedThing() {' --src-end $'\n}\n' --dst-after 'class Target {'
+blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-end $'\n}\n' --dst-after $'class Target {\n'
 ```
 
 `check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing.
@@ -43,14 +43,16 @@ blockpatch move --src src/foo.ts --src-start 'function movedThing() {' --src-end
 blockpatch move --json - <<'JSON'
 {
   "src": "src/foo.ts",
-  "src_start": "export function movedThing(",
+  "src_start": "\nexport function movedThing(",
   "src_end": "\n}\n",
   "dst": "src/bar.ts",
-  "dst_after": "export class Target {",
+  "dst_after": "export class Target {\n",
   "insert": "after"
 }
 JSON
 ```
+
+Matching and insertion are byte-exact: the moved bytes are cut at the source and inserted directly at the anchor boundary, with no newline handling. Keep delimiters and anchors on line boundaries or the result will splice mid-line — end `dst_after` anchors with `\n`, start `dst_before` anchors at the beginning of a line, and include the surrounding newlines you want moved in `src_start`/`src_end`.
 
 The same shape can be loaded from a file:
 
@@ -63,13 +65,13 @@ Human-friendly flags are also supported:
 ```sh
 blockpatch move \
   --src src/foo.ts \
-  --src-start 'export function movedThing(' \
+  --src-start $'\nexport function movedThing(' \
   --src-end $'\n}\n' \
   --dst src/bar.ts \
-  --dst-after 'export class Target {'
+  --dst-after $'export class Target {\n'
 ```
 
-Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document, and `--json-output` for machine-readable success or error output.
+Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output.
 
 ## Move JSON
 
@@ -138,16 +140,19 @@ blockpatch move id=<id> payload-sha256=<sha256>
 +++ b/<path>
 
 @@ blockpatch-source <id> -<old-start>,<old-count> +<new-start>,<new-count> @@ optional label
- <context before>
+[ <context before> ]
 -<moved payload>
- <context after>
+[ <context after> ]
 
 @@ blockpatch-target <id> -<old-start>,<old-count> +<new-start>,<new-count> @@ optional label
- <target context>
+[ <target context before> ]
 +<same moved payload>
+[ <target context after> ]
 ```
 
-The target payload may also appear before target context:
+Source context may be one-sided or absent at file boundaries. The exact concatenation of source context before, moved payload, and source context after must match uniquely.
+
+The target hunk must include context on at least one side. If the target hunk has both before and after context, `blockpatch` matches their exact concatenation in the target file and inserts at the boundary between them. The target payload may also appear before target context:
 
 ```diff
 @@ blockpatch-target move-1 -40,1 +40,2 @@
@@ -155,7 +160,7 @@ The target payload may also appear before target context:
  target line
 ```
 
-In that case `blockpatch` inserts immediately before the target context. Otherwise, it inserts immediately after the context before the `+` payload.
+In that case `blockpatch` inserts immediately before the target context. If only context before the `+` payload is present, it inserts immediately after that context.
 
 ## Semantics
 
@@ -168,10 +173,10 @@ For one patch:
 5. Verify target payload exactly equals source payload.
 6. Verify `payload-sha256` matches the exact moved payload bytes.
 7. Locate exactly one source match for `source context before + payload + source context after`.
-8. Locate exactly one target anchor independently from target context.
-9. Fail if the target anchor overlaps the source payload bytes.
+8. Locate exactly one target match for `target context before + target context after`.
+9. Fail if the target context range overlaps the source payload bytes.
 10. Remove the original source payload bytes.
-11. Insert those exact original bytes at the target.
+11. Insert those exact original bytes at the target context boundary.
 12. Write atomically by writing a temp file in the same directory, then renaming it over the original.
 
 ## Failure Rules

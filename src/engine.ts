@@ -112,7 +112,7 @@ export function applyMove(file: Buffer, selection: MoveSelection): { src: Buffer
     file.subarray(selection.source.end)
   ]);
   const targetIndex =
-    selection.target.insertIndex > selection.source.end
+    selection.target.insertIndex >= selection.source.end
       ? selection.target.insertIndex - selection.payload.length
       : selection.target.insertIndex;
 
@@ -181,7 +181,9 @@ function findSourceEnvelopes(file: Buffer, patch: BlockPatch): ByteRange[] {
 }
 
 function findTarget(file: Buffer, patch: BlockPatch): TargetSelection {
-  const matches = indexesOf(file, patch.target.anchor);
+  const target = targetContext(patch.target);
+  const anchor = Buffer.concat([target.before, target.after]);
+  const matches = indexesOf(file, anchor);
 
   if (matches.length === 0) {
     fail("target_not_found", `Target anchor was not found in ${patch.dst}`);
@@ -192,11 +194,21 @@ function findTarget(file: Buffer, patch: BlockPatch): TargetSelection {
   }
 
   const start = matches[0];
-  const end = start + patch.target.anchor.length;
+  const end = start + anchor.length;
   return {
     range: { start, end },
-    insertIndex: patch.target.kind === "before" ? start : end
+    insertIndex: start + target.before.length
   };
+}
+
+function targetContext(target: BlockPatch["target"]): { before: Buffer; after: Buffer } {
+  if ("anchor" in target) {
+    return target.kind === "before"
+      ? { before: Buffer.alloc(0), after: target.anchor }
+      : { before: target.anchor, after: Buffer.alloc(0) };
+  }
+
+  return target;
 }
 
 export function indexesOf(haystack: Buffer, needle: Buffer): number[] {

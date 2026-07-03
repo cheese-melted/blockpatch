@@ -12,10 +12,15 @@ export interface BlockPatch {
   target: TargetAnchor;
 }
 
-export interface TargetAnchor {
-  kind: TargetKind;
-  anchor: Buffer;
-}
+export type TargetAnchor =
+  | {
+      before: Buffer;
+      after: Buffer;
+    }
+  | {
+      kind: TargetKind;
+      anchor: Buffer;
+    };
 
 export interface ApplyOptions {
   cwd?: string;

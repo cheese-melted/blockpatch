@@ -192,10 +192,6 @@ function parseSourceHunk(hunk: Hunk): { before: Buffer; payload: Buffer; after: 
   const payload = payloadBytes(hunk, "-");
   const after = concatLines(afterLines);
 
-  if (before.length === 0 || after.length === 0) {
-    fail("parse_error", "Source hunk must include context before and after the moved payload");
-  }
-
   return { before, payload, after };
 }
 
@@ -220,16 +216,13 @@ function parseTargetHunk(hunk: Hunk): TargetAnchor {
   }
 
   const before = concatLines(beforeLines);
-  if (before.length > 0) {
-    return { kind: "after", anchor: before };
-  }
-
   const after = concatLines(afterLines);
-  if (after.length > 0) {
-    return { kind: "before", anchor: after };
+
+  if (before.length === 0 && after.length === 0) {
+    fail("parse_error", "Target hunk must include context before or after the moved payload");
   }
 
-  fail("parse_error", "Target hunk must include context before or after the moved payload");
+  return { before, after };
 }
 
 function payloadBytes(hunk: Hunk, prefix: "-" | "+"): Buffer {
