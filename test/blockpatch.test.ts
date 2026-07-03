@@ -574,6 +574,68 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
+  test("move --json accepts expected_payload_sha256", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n",
+        target_after: "}\n",
+        expected_payload_sha256: "a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
+  });
+
+  test("move --json rejects expected_payload_sha256 mismatch without modifying files", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n",
+        target_after: "}\n",
+        expected_payload_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      ok: boolean;
+      error: { code: string; field: string };
+    };
+    expect(stderr.ok).toBe(false);
+    expect(stderr.error).toMatchObject({
+      code: "hash_mismatch",
+      field: "expected_payload_sha256"
+    });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
   test("move --json path supports dry-run", async () => {
     const cwd = await moveFixture();
     const before = await readFile(join(cwd, "source.ts"), "utf8");
@@ -727,12 +789,54 @@ describe("CLI", () => {
 
     expect(await proc.exited).toBe(0);
     expect(await new Response(proc.stderr).text()).toBe("");
-    await writeFile(join(cwd, "generated.blockpatch"), await new Response(proc.stdout).text());
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("diff --blockpatch a/source.ts b/source.ts");
+    expect(stdout).toContain("blockpatch move id=move-1 role=source payload-sha256=");
+    expect(stdout).toContain("diff --blockpatch a/target.ts b/target.ts");
+    expect(stdout).toContain("blockpatch move id=move-1 role=target payload-sha256=");
+    expect(stdout).not.toContain("diff --blockpatch a/source.ts b/target.ts");
+
+    await writeFile(join(cwd, "generated.blockpatch"), stdout);
     await applyPatchFile("generated.blockpatch", { cwd });
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe("before\nafter\n");
     expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe(
       "class Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
     );
+  });
+
+  test("old single-section cross-file patch shape is rejected", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-old-cross-file-"));
+    await writeFile(join(cwd, "source.ts"), "before\nfunction movedThing() {\n  return 42;\n}\nafter\n");
+    await writeFile(join(cwd, "target.ts"), "class Target {\n}\n");
+    await writeFile(
+      join(cwd, "old.blockpatch"),
+      "diff --blockpatch a/source.ts b/target.ts\n" +
+        "blockpatch version 1\n" +
+        "blockpatch move id=move-1 payload-sha256=a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6\n" +
+        "--- a/source.ts\n" +
+        "+++ b/target.ts\n" +
+        "\n" +
+        "@@ -1,5 +1,2 @@ blockpatch-source id=move-1\n" +
+        " before\n" +
+        "-function movedThing() {\n" +
+        "-  return 42;\n" +
+        "-}\n" +
+        " after\n" +
+        "\n" +
+        "@@ -1,1 +1,4 @@ blockpatch-target id=move-1\n" +
+        " class Target {\n" +
+        "+function movedThing() {\n" +
+        "+  return 42;\n" +
+        "+}\n"
+    );
+
+    await expect(applyPatchFile("old.blockpatch", { cwd })).rejects.toThrow(
+      "Cross-file moves must use separate source and target file sections"
+    );
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "before\nfunction movedThing() {\n  return 42;\n}\nafter\n"
+    );
+    expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe("class Target {\n}\n");
   });
 
   test("move --diff prints a patch and does not modify files", async () => {
@@ -825,6 +929,36 @@ describe("CLI", () => {
     };
     expect(stderr.ok).toBe(false);
     expect(stderr.error.code).toBe("invalid_json");
+  });
+
+  test("move --json-output includes invalid move argument fields", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: 123,
+        src_end: "}\n",
+        target_before: "class Target {\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      ok: boolean;
+      error: { code: string; field: string };
+    };
+    expect(stderr.ok).toBe(false);
+    expect(stderr.error).toMatchObject({
+      code: "invalid_move_args",
+      field: "src_start"
+    });
   });
 
   test("move --json-output includes structured match details", async () => {
@@ -949,6 +1083,18 @@ describe("moveBlock API", () => {
     ).rejects.toThrow("move argument src_start must be a string");
   });
 
+  test("rejects invalid expected payload hash", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: "a",
+        src_end: "b",
+        target_before: "c",
+        expected_payload_sha256: "not-a-sha"
+      })
+    ).rejects.toThrow("expected_payload_sha256 must be a 64-character lowercase sha256 hex digest");
+  });
+
   test("rejects legacy insert argument", async () => {
     await expect(
       moveBlock({
@@ -1007,6 +1153,36 @@ describe("moveBlock API", () => {
         { cwd }
       )
     ).rejects.toThrow("escapes the working directory");
+  });
+
+  test("rejects absolute src paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-absolute-"));
+    await expect(
+      moveBlock(
+        {
+          src: join(cwd, "source.ts"),
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("must be relative");
+  });
+
+  test("rejects NUL bytes in paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-nul-"));
+    await expect(
+      moveBlock(
+        {
+          src: "source.ts\0.txt",
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("Invalid source path");
   });
 
   test("--diff emits real line-number hints", async () => {
@@ -1080,6 +1256,25 @@ describe("format hardening", () => {
 
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("escapes the working directory");
     expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
+  });
+
+  test("patch paths may not be absolute", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-absolute-path-"));
+    const absolutePath = join(cwd, "file.txt");
+    await writeFile(absolutePath, "safe\nmove me\nomega\nanchor\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        absolutePath,
+        absolutePath,
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n safe\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n anchor\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("must be relative");
+    expect(await readFile(absolutePath, "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
   });
 
   test("patch files may be read outside the working directory", async () => {
@@ -1176,12 +1371,14 @@ describe("format hardening", () => {
   });
 
   test.skipIf(process.getuid?.() === 0)(
-    "interrupted cross-file move duplicates the payload instead of losing it",
+    "failed cross-file staging leaves originals untouched",
     async () => {
       const cwd = await mkdtemp(join(tmpdir(), "blockpatch-interrupted-"));
       await mkdir(join(cwd, "locked"));
-      await writeFile(join(cwd, "locked", "source.ts"), "before\nfunction movedThing() {\n}\nafter\n");
-      await writeFile(join(cwd, "target.ts"), "class Target {\n}\n");
+      const sourceBefore = "before\nfunction movedThing() {\n}\nafter\n";
+      const targetBefore = "class Target {\n}\n";
+      await writeFile(join(cwd, "locked", "source.ts"), sourceBefore);
+      await writeFile(join(cwd, "target.ts"), targetBefore);
       await chmod(join(cwd, "locked"), 0o555);
 
       try {
@@ -1200,8 +1397,8 @@ describe("format hardening", () => {
 
         const source = await readFile(join(cwd, "locked", "source.ts"), "utf8");
         const target = await readFile(join(cwd, "target.ts"), "utf8");
-        expect(source).toContain("function movedThing()");
-        expect(target).toContain("function movedThing()");
+        expect(source).toBe(sourceBefore);
+        expect(target).toBe(targetBefore);
       } finally {
         await chmod(join(cwd, "locked"), 0o755);
       }

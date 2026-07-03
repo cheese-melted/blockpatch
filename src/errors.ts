@@ -1,4 +1,5 @@
 export interface BlockPatchErrorDetails {
+  field?: string;
   path?: string;
   matches?: number;
 }

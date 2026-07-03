@@ -46,7 +46,7 @@ blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-
 
 `check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing.
 
-Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must resolve inside `--cwd`. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
+Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths and `..` escapes are rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
 
 `apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Because patch headers require `a/` and `b/` prefixes, the default is equivalent to `-p1`.
 
@@ -99,6 +99,7 @@ type MoveBlockArgs = {
   dst?: string
   target_before?: string
   target_after?: string
+  expected_payload_sha256?: string
   dry_run?: boolean
 }
 ```
@@ -112,6 +113,7 @@ Rules:
 - if only `target_before` is supplied, insertion is immediately after that context.
 - if only `target_after` is supplied, insertion is immediately before that context.
 - either target side may be empty when both are supplied, but not both may be empty.
+- `expected_payload_sha256` is optional; when supplied, the selected source bytes must hash to that value before any write happens.
 - source delimiter match must be unique.
 - target anchor match must be unique.
 - moved bytes are extracted from the source file, not regenerated from args.
@@ -150,6 +152,7 @@ type BlockPatchJsonError = {
   error: {
     code: string
     message: string
+    field?: string
     path?: string
     matches?: number
   }
@@ -187,9 +190,15 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
 
 Line numbers in hunk headers are review hints only. Application uses context and exact payload verification, not line numbers.
 
-The `--- a/<path>` and `+++ b/<path>` headers may name the same file for an intra-file move or different files for a source-to-destination move. The `a/` and `b/` prefixes are required, and the `diff --blockpatch` line must name the same two raw paths. By default, `blockpatch` strips one leading component from those raw paths, so `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
+Same-file moves use one file section with paired source and target hunks. In that shape, the `--- a/<path>` and `+++ b/<path>` headers must name the same file after normal path cleanup.
+
+Cross-file moves use two conventional file sections tied by the same move id and payload hash: one `role=source` section for the source file and one `role=target` section for the target file. Each section's `---` and `+++` headers name the same file. This avoids the misleading patch shape where `--- a/source.ts` and `+++ b/target.ts` look like a transformation from one filename into another.
+
+The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. By default, `blockpatch` strips one leading component from those raw paths, so `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
 
 ## Grammar
+
+Same-file move:
 
 ```text
 diff --blockpatch a/<path> b/<path>
@@ -202,6 +211,32 @@ blockpatch move id=<id> payload-sha256=<sha256>
 [ <source context before> ]
 -<moved payload>
 [ <source context after> ]
+
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-target id=<id> optional label
+[ <target context before> ]
++<same moved payload>
+[ <target context after> ]
+```
+
+Cross-file move:
+
+```text
+diff --blockpatch a/<source-path> b/<source-path>
+blockpatch version 1
+blockpatch move id=<id> role=source payload-sha256=<sha256>
+--- a/<source-path>
++++ b/<source-path>
+
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-source id=<id> optional label
+[ <source context before> ]
+-<moved payload>
+[ <source context after> ]
+
+diff --blockpatch a/<target-path> b/<target-path>
+blockpatch version 1
+blockpatch move id=<id> role=target payload-sha256=<sha256>
+--- a/<target-path>
++++ b/<target-path>
 
 @@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-target id=<id> optional label
 [ <target context before> ]
@@ -230,7 +265,7 @@ Either target side may be empty, but not both.
 
 For one patch:
 
-1. Parse `diff --blockpatch`, metadata, source/destination file headers, and paired source/target hunks.
+1. Parse either one same-file section with paired source/target hunks, or two cross-file sections tied by `role=source` and `role=target`.
 2. Verify source and target hunk ids match `blockpatch move id=<id>`.
 3. Extract source payload from contiguous `-` lines.
 4. Extract target payload from contiguous `+` lines.
@@ -243,14 +278,14 @@ For one patch:
 11. Insert those exact original bytes at the target context boundary.
 12. Write changed files with temp-file-and-rename replacement.
 
-Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files, then write each file atomically, but the two-file operation is not transactional. The destination is written before the source so an interrupted cross-file move can duplicate the payload, but should not delete it from both files.
+Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files and stage all changed temp files before renaming any original. If staging fails, originals are left untouched. Once renames begin, the two-file operation is still not transactional; the destination is renamed before the source so an interruption can duplicate the payload, but should not delete it from both files.
 
 ## Failure Rules
 
 `blockpatch` exits non-zero and does not modify files when:
 
 - the patch file is malformed
-- a patch-declared or move-declared source/destination path escapes `--cwd`
+- a patch-declared or move-declared source/destination path is absolute, invalid, or escapes `--cwd`
 - source anchors are missing
 - source anchors or full source are ambiguous
 - the located source payload does not exactly match the source hunk payload

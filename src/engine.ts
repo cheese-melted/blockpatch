@@ -34,6 +34,16 @@ export interface CommitMoveArgs {
   dstLabel: string;
 }
 
+interface AtomicWriteRequest {
+  path: string;
+  bytes: Buffer;
+}
+
+interface StagedAtomicWrite {
+  path: string;
+  temp: string;
+}
+
 export async function checkPatchFile(
   patchPath: string,
   options: ApplyOptions = {}
@@ -152,14 +162,16 @@ export async function commitMove(args: CommitMoveArgs): Promise<string[]> {
   const dstChanged = !args.sameFile && !next.dst.equals(args.dstOriginal);
 
   if (!args.dryRun) {
-    // Destination before source: an interrupted cross-file move can leave the
-    // payload duplicated in both files, never deleted from both.
+    const writes: AtomicWriteRequest[] = [];
+    // Destination before source: once renames begin, an interrupted cross-file
+    // move can leave the payload duplicated in both files, never deleted from both.
     if (dstChanged) {
-      await writeAtomic(args.dstPath, next.dst);
+      writes.push({ path: args.dstPath, bytes: next.dst });
     }
     if (srcChanged) {
-      await writeAtomic(args.srcPath, next.src);
+      writes.push({ path: args.srcPath, bytes: next.src });
     }
+    await writeAtomically(writes);
   }
 
   const changed: string[] = [];
@@ -324,6 +336,26 @@ export function unique(paths: string[]): string[] {
 }
 
 export async function writeAtomic(path: string, bytes: Buffer): Promise<void> {
+  await writeAtomically([{ path, bytes }]);
+}
+
+async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
+  const staged: StagedAtomicWrite[] = [];
+
+  try {
+    for (const write of writes) {
+      staged.push(await stageAtomicWrite(write.path, write.bytes));
+    }
+    for (const write of staged) {
+      await rename(write.temp, write.path);
+    }
+  } catch (error) {
+    await Promise.all(staged.map((write) => unlink(write.temp).catch(() => undefined)));
+    throw error;
+  }
+}
+
+async function stageAtomicWrite(path: string, bytes: Buffer): Promise<StagedAtomicWrite> {
   const info = await stat(path);
   const dir = dirname(path);
   const base = basename(path);
@@ -332,9 +364,10 @@ export async function writeAtomic(path: string, bytes: Buffer): Promise<void> {
   try {
     await writeFile(temp, bytes, { flag: "wx" });
     await chmod(temp, info.mode);
-    await rename(temp, path);
   } catch (error) {
     await unlink(temp).catch(() => undefined);
     throw error;
   }
+
+  return { path, temp };
 }

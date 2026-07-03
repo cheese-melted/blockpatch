@@ -2,6 +2,13 @@ import { isAbsolute, relative, resolve } from "node:path";
 import { fail } from "./errors";
 
 export function resolvePath(cwd: string, path: string, label: string): string {
+  if (path === "" || path.includes("\0")) {
+    fail("invalid_path", `Invalid ${label}: ${path}`, { path });
+  }
+  if (isAbsolute(path)) {
+    fail("path_outside_cwd", `${label} must be relative to the working directory: ${path}`, { path });
+  }
+
   const root = resolve(cwd);
   const resolved = resolve(root, path);
 

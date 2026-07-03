@@ -30,6 +30,7 @@ const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   dst: "string",
   target_before: "string",
   target_after: "string",
+  expected_payload_sha256: "string",
   dry_run: "boolean"
 };
 
@@ -50,6 +51,11 @@ export async function moveBlock(
   const target = findTargetSelection(dstOriginal, normalized.targetBefore, normalized.targetAfter, normalized.dst);
   const selection = buildMoveSelection(srcOriginal, source, target, sameFile, normalized.dst);
   const payloadSha256 = createHash("sha256").update(selection.payload).digest("hex");
+  if (validated.expected_payload_sha256 !== undefined && validated.expected_payload_sha256 !== payloadSha256) {
+    fail("hash_mismatch", "expected_payload_sha256 does not match selected source payload", {
+      field: "expected_payload_sha256"
+    });
+  }
   const patch = options.diff
     ? renderMovePatch(normalized, srcOriginal, dstOriginal, selection, sameFile, payloadSha256)
     : undefined;
@@ -91,39 +97,49 @@ export function validateMoveArgs(value: unknown): MoveBlockArgs {
   for (const [key, fieldValue] of Object.entries(value)) {
     const expected = moveArgTypes[key as keyof MoveBlockArgs];
     if (expected === undefined) {
-      fail("invalid_move_args", `Unknown move argument: ${key}`);
+      fail("invalid_move_args", `Unknown move argument: ${key}`, { field: key });
     }
     if (typeof fieldValue !== expected) {
-      fail("invalid_move_args", `move argument ${key} must be a ${expected}`);
+      fail("invalid_move_args", `move argument ${key} must be a ${expected}`, { field: key });
     }
   }
 
-  return value as MoveBlockArgs;
+  const args = value as MoveBlockArgs;
+  if (
+    args.expected_payload_sha256 !== undefined &&
+    !/^[a-f0-9]{64}$/.test(args.expected_payload_sha256)
+  ) {
+    fail("invalid_move_args", "expected_payload_sha256 must be a 64-character lowercase sha256 hex digest", {
+      field: "expected_payload_sha256"
+    });
+  }
+
+  return args;
 }
 
 function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
   if (!args.src) {
-    fail("invalid_move_args", "move requires src");
+    fail("invalid_move_args", "move requires src", { field: "src" });
   }
   if (!args.src_start) {
-    fail("invalid_move_args", "move requires src_start");
+    fail("invalid_move_args", "move requires src_start", { field: "src_start" });
   }
   if (!args.src_end) {
-    fail("invalid_move_args", "move requires src_end");
+    fail("invalid_move_args", "move requires src_end", { field: "src_end" });
   }
 
   const hasTargetBefore = args.target_before !== undefined;
   const hasTargetAfter = args.target_after !== undefined;
 
   if (!hasTargetBefore && !hasTargetAfter) {
-    fail("invalid_move_args", "move requires target_before or target_after");
+    fail("invalid_move_args", "move requires target_before or target_after", { field: "target_before" });
   }
 
   const targetBefore = Buffer.from(args.target_before ?? "", "utf8");
   const targetAfter = Buffer.from(args.target_after ?? "", "utf8");
 
   if (targetBefore.length === 0 && targetAfter.length === 0) {
-    fail("invalid_move_args", "move requires non-empty target context");
+    fail("invalid_move_args", "move requires non-empty target context", { field: "target_before" });
   }
 
   return {
@@ -202,6 +218,33 @@ function renderMovePatch(
     renderHunkBytes(args.targetAfter, " ")
   ]);
 
+  const sourceHunkHeader =
+    `@@ -${sourceOldStart},${sourceOldCount} +${sourceNewStart},${sourceNewCount} @@ blockpatch-source id=${id}`;
+  const targetHunkHeader =
+    `@@ -${targetOldStart},${targetOldCount} +${targetNewStart},${targetNewCount} @@ blockpatch-target id=${id}`;
+
+  if (!sameFile) {
+    return [
+      `diff --blockpatch a/${args.src} b/${args.src}`,
+      "blockpatch version 1",
+      `blockpatch move id=${id} role=source payload-sha256=${payloadSha256}`,
+      `--- a/${args.src}`,
+      `+++ b/${args.src}`,
+      "",
+      sourceHunkHeader,
+      sourceBody,
+      "",
+      `diff --blockpatch a/${args.dst} b/${args.dst}`,
+      "blockpatch version 1",
+      `blockpatch move id=${id} role=target payload-sha256=${payloadSha256}`,
+      `--- a/${args.dst}`,
+      `+++ b/${args.dst}`,
+      "",
+      targetHunkHeader,
+      targetBody
+    ].join("\n");
+  }
+
   return [
     `diff --blockpatch a/${args.src} b/${args.dst}`,
     "blockpatch version 1",
@@ -209,10 +252,10 @@ function renderMovePatch(
     `--- a/${args.src}`,
     `+++ b/${args.dst}`,
     "",
-    `@@ -${sourceOldStart},${sourceOldCount} +${sourceNewStart},${sourceNewCount} @@ blockpatch-source id=${id}`,
+    sourceHunkHeader,
     sourceBody,
     "",
-    `@@ -${targetOldStart},${targetOldCount} +${targetNewStart},${targetNewCount} @@ blockpatch-target id=${id}`,
+    targetHunkHeader,
     targetBody
   ].join("\n");
 }

@@ -51,6 +51,7 @@ export interface MoveBlockArgs {
   dst?: string;
   target_before?: string;
   target_after?: string;
+  expected_payload_sha256?: string;
   dry_run?: boolean;
 }
 
@@ -69,6 +70,7 @@ export interface BlockPatchJsonError {
   error: {
     code: string;
     message: string;
+    field?: string;
     path?: string;
     matches?: number;
   };

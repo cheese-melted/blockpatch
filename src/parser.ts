@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { posix } from "node:path";
 import { fail } from "./errors";
 import type { BlockPatch, TargetAnchor } from "./types";
 
@@ -20,6 +21,15 @@ interface HunkLine {
   content: Buffer;
 }
 
+interface Section {
+  src: string;
+  dst: string;
+  moveId: string;
+  payloadSha256: string;
+  role?: "source" | "target";
+  hunks: Hunk[];
+}
+
 const noNewlineMarker = "\\ No newline at end of file";
 const movePrefix = "blockpatch move ";
 const hunkPattern =
@@ -30,23 +40,107 @@ export function parseBlockPatch(
   options: { stripComponents?: number } = {}
 ): BlockPatch {
   const lines = splitLines(input);
-  const header = parseHeader(lines, normalizeStripComponents(options.stripComponents ?? 1));
-  const hunks = parseHunks(lines, header.hunkStart);
+  const sections = parseSections(lines, normalizeStripComponents(options.stripComponents ?? 1));
 
-  if (hunks.length !== 2) {
+  if (sections.length === 1) {
+    return parseSingleSectionMove(sections[0]);
+  }
+
+  if (sections.length === 2) {
+    return parseSplitSectionMove(sections);
+  }
+
+  fail("parse_error", "Patch must contain one same-file move or one split cross-file move");
+}
+
+function parseSingleSectionMove(section: Section): BlockPatch {
+  if (section.role !== undefined) {
+    fail("parse_error", "role metadata is only valid for split cross-file move sections");
+  }
+
+  if (!samePatchPath(section.src, section.dst)) {
+    fail("parse_error", "Cross-file moves must use separate source and target file sections");
+  }
+
+  if (section.hunks.length !== 2) {
     fail("parse_error", "Patch must contain exactly one source hunk and one target hunk");
   }
 
-  const sourceHunk = hunks.find((hunk) => hunk.kind === "source");
-  const targetHunk = hunks.find((hunk) => hunk.kind === "target");
+  const sourceHunk = section.hunks.find((hunk) => hunk.kind === "source");
+  const targetHunk = section.hunks.find((hunk) => hunk.kind === "target");
   if (sourceHunk === undefined || targetHunk === undefined) {
     fail("parse_error", "Patch must contain paired blockpatch-source and blockpatch-target hunks");
   }
 
-  if (sourceHunk.id !== header.moveId || targetHunk.id !== header.moveId) {
+  if (sourceHunk.id !== section.moveId || targetHunk.id !== section.moveId) {
     fail("parse_error", "Move metadata id must match source and target hunk ids");
   }
 
+  return buildBlockPatch(section.src, section.dst, section.moveId, section.payloadSha256, sourceHunk, targetHunk);
+}
+
+function parseSplitSectionMove(sections: Section[]): BlockPatch {
+  if (sections.some((section) => section.role === undefined)) {
+    fail("parse_error", "Split cross-file move sections must include role=source or role=target");
+  }
+
+  const sourceSections = sections.filter((section) => section.role === "source");
+  const targetSections = sections.filter((section) => section.role === "target");
+  if (sourceSections.length !== 1 || targetSections.length !== 1) {
+    fail("parse_error", "Split cross-file moves must contain one source role section and one target role section");
+  }
+
+  const sourceSection = sourceSections[0];
+  const targetSection = targetSections[0];
+
+  if (!samePatchPath(sourceSection.src, sourceSection.dst) || !samePatchPath(targetSection.src, targetSection.dst)) {
+    fail("parse_error", "Split cross-file section headers must name the same file in --- and +++");
+  }
+
+  if (samePatchPath(sourceSection.src, targetSection.src)) {
+    fail("parse_error", "Split cross-file moves require different source and target files");
+  }
+
+  if (sourceSection.moveId !== targetSection.moveId) {
+    fail("parse_error", "Split cross-file move sections must use the same move id");
+  }
+
+  if (sourceSection.payloadSha256 !== targetSection.payloadSha256) {
+    fail("parse_error", "Split cross-file move sections must use the same payload-sha256");
+  }
+
+  if (sourceSection.hunks.length !== 1 || sourceSection.hunks[0].kind !== "source") {
+    fail("parse_error", "Source role section must contain exactly one blockpatch-source hunk");
+  }
+
+  if (targetSection.hunks.length !== 1 || targetSection.hunks[0].kind !== "target") {
+    fail("parse_error", "Target role section must contain exactly one blockpatch-target hunk");
+  }
+
+  const sourceHunk = sourceSection.hunks[0];
+  const targetHunk = targetSection.hunks[0];
+  if (sourceHunk.id !== sourceSection.moveId || targetHunk.id !== targetSection.moveId) {
+    fail("parse_error", "Move metadata id must match source and target hunk ids");
+  }
+
+  return buildBlockPatch(
+    sourceSection.src,
+    targetSection.src,
+    sourceSection.moveId,
+    sourceSection.payloadSha256,
+    sourceHunk,
+    targetHunk
+  );
+}
+
+function buildBlockPatch(
+  src: string,
+  dst: string,
+  moveId: string,
+  payloadSha256: string,
+  sourceHunk: Hunk,
+  targetHunk: Hunk
+): BlockPatch {
   const source = parseSourceHunk(sourceHunk);
   const target = parseTargetHunk(targetHunk);
   const targetPayload = payloadBytes(targetHunk, "+");
@@ -56,16 +150,16 @@ export function parseBlockPatch(
   }
 
   const actualHash = createHash("sha256").update(source.payload).digest("hex");
-  if (actualHash !== header.payloadSha256) {
+  if (actualHash !== payloadSha256) {
     fail("hash_mismatch", "payload-sha256 does not match moved payload");
   }
 
   return {
     type: "move",
-    id: header.moveId,
-    src: header.src,
-    dst: header.dst,
-    payloadSha256: header.payloadSha256,
+    id: moveId,
+    src,
+    dst,
+    payloadSha256,
     sourceBefore: source.before,
     sourcePayload: source.payload,
     sourceAfter: source.after,
@@ -73,25 +167,35 @@ export function parseBlockPatch(
   };
 }
 
-function parseHeader(
-  lines: PatchLine[],
-  stripComponents: number
-): {
-  src: string;
-  dst: string;
-  moveId: string;
-  payloadSha256: string;
-  hunkStart: number;
-} {
+function parseSections(lines: PatchLine[], stripComponents: number): Section[] {
   if (text(lines[0])?.startsWith("diff --blockpatch ") !== true) {
     fail("parse_error", "Patch must start with diff --blockpatch");
   }
 
-  if (text(lines[1]) !== "blockpatch version 1") {
+  const starts: number[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (text(lines[index])?.startsWith("diff --blockpatch ") === true) {
+      starts.push(index);
+    }
+  }
+
+  return starts.map((start, index) => {
+    const end = starts[index + 1] ?? lines.length;
+    return parseSection(lines, start, end, stripComponents);
+  });
+}
+
+function parseSection(
+  lines: PatchLine[],
+  start: number,
+  end: number,
+  stripComponents: number
+): Section {
+  if (text(lines[start + 1]) !== "blockpatch version 1") {
     fail("parse_error", "Patch must declare blockpatch version 1");
   }
 
-  const moveLine = text(lines[2]);
+  const moveLine = text(lines[start + 2]);
   if (moveLine?.startsWith(movePrefix) !== true) {
     fail("parse_error", "Patch must declare blockpatch move metadata");
   }
@@ -99,22 +203,26 @@ function parseHeader(
   const metadata = parseMetadata(moveLine.slice(movePrefix.length));
   const moveId = metadata.get("id");
   const payloadSha256 = metadata.get("payload-sha256");
+  const role = metadata.get("role");
   if (!moveId) {
     fail("parse_error", "blockpatch move metadata must include id=<id>");
   }
   if (!payloadSha256 || !/^[a-f0-9]{64}$/.test(payloadSha256)) {
     fail("parse_error", "blockpatch move metadata must include payload-sha256=<64 hex chars>");
   }
+  if (role !== undefined && role !== "source" && role !== "target") {
+    fail("parse_error", "blockpatch move role must be source or target");
+  }
 
-  const oldRawPath = parseFileHeader(text(lines[3]), "---", "a/");
-  const newRawPath = parseFileHeader(text(lines[4]), "+++", "b/");
+  const oldRawPath = parseFileHeader(text(lines[start + 3]), "---", "a/");
+  const newRawPath = parseFileHeader(text(lines[start + 4]), "+++", "b/");
 
-  if (text(lines[0])?.trimEnd() !== `diff --blockpatch ${oldRawPath} ${newRawPath}`) {
+  if (text(lines[start])?.trimEnd() !== `diff --blockpatch ${oldRawPath} ${newRawPath}`) {
     fail("parse_error", "diff --blockpatch paths must match the --- and +++ headers");
   }
 
-  let hunkStart = 5;
-  while (hunkStart < lines.length && text(lines[hunkStart]) === "") {
+  let hunkStart = start + 5;
+  while (hunkStart < end && text(lines[hunkStart]) === "") {
     hunkStart += 1;
   }
 
@@ -123,7 +231,8 @@ function parseHeader(
     dst: stripPath(newRawPath, stripComponents),
     moveId,
     payloadSha256,
-    hunkStart
+    role,
+    hunks: parseHunks(lines, hunkStart, end)
   };
 }
 
@@ -134,11 +243,11 @@ function normalizeStripComponents(value: number): number {
   return value;
 }
 
-function parseHunks(lines: PatchLine[], start: number): Hunk[] {
+function parseHunks(lines: PatchLine[], start: number, end: number): Hunk[] {
   const hunks: Hunk[] = [];
   let index = start;
 
-  while (index < lines.length) {
+  while (index < end) {
     const header = text(lines[index]);
     if (header === "") {
       index += 1;
@@ -159,7 +268,7 @@ function parseHunks(lines: PatchLine[], start: number): Hunk[] {
     };
     index += 1;
 
-    while (index < lines.length) {
+    while (index < end) {
       const maybeHeader = text(lines[index]);
       if (parseHunkHeader(maybeHeader) !== undefined) {
         break;
@@ -168,10 +277,10 @@ function parseHunks(lines: PatchLine[], start: number): Hunk[] {
       const body = lines[index].body;
       if (body.length === 0) {
         let lookahead = index + 1;
-        while (lookahead < lines.length && lines[lookahead].body.length === 0) {
+        while (lookahead < end && lines[lookahead].body.length === 0) {
           lookahead += 1;
         }
-        if (lookahead < lines.length && parseHunkHeader(text(lines[lookahead])) === undefined) {
+        if (lookahead < end && parseHunkHeader(text(lines[lookahead])) === undefined) {
           fail(
             "parse_error",
             "Hunk bodies must not contain blank lines; encode an empty context line as a single space"
@@ -203,6 +312,10 @@ function parseHunks(lines: PatchLine[], start: number): Hunk[] {
   }
 
   return hunks;
+}
+
+function samePatchPath(left: string, right: string): boolean {
+  return posix.normalize(left) === posix.normalize(right);
 }
 
 function parseHunkHeader(
