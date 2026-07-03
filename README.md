@@ -165,7 +165,7 @@ Errors print:
 type BlockPatchJsonError = {
   ok: false
   error: {
-    code: string
+    code: BlockPatchErrorCode
     message: string
     field?: string
     path?: string
@@ -182,7 +182,7 @@ Ambiguous-match errors include up to the first 10 exact byte ranges for the matc
 Error codes are the agent-facing branch contract. From `1.0.0` onward, removing a code or changing its meaning is semver-major.
 
 ```ts
-type ErrorCode =
+type BlockPatchErrorCode =
   | "parse_error"
   | "invalid_path"
   | "path_outside_cwd"

@@ -1,9 +1,10 @@
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { boundedMatchRanges, boundedRanges, fail } from "./errors";
 import { parseBlockPatch } from "./parser";
-import { resolvePath } from "./paths";
+import { resolvePath, sameFileIdentity } from "./paths";
 import type { ApplyOptions, ApplyResult, BlockPatch, MoveResultDetails } from "./types";
 
 export interface ByteRange {
@@ -105,7 +106,7 @@ async function applyMovePatch(
   const effectivePatch = reverse ? reverseMovePatch(patch) : patch;
   const srcPath = resolvePath(cwd, effectivePatch.src, "source path");
   const dstPath = resolvePath(cwd, effectivePatch.dst, "destination path");
-  const sameFile = srcPath === dstPath;
+  const sameFile = await sameFileIdentity(srcPath, dstPath);
   const srcOriginal = await readFile(srcPath);
   const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
   const plan = selectMovePlan(srcOriginal, dstOriginal, effectivePatch, sameFile);
@@ -255,12 +256,13 @@ export async function commitMove(args: CommitMoveArgs): Promise<string[]> {
     : applyCrossFileMove(args.srcOriginal, args.dstOriginal, args.selection);
   const srcChanged = !next.src.equals(args.srcOriginal);
   const dstChanged = !args.sameFile && !next.dst.equals(args.dstOriginal);
+  const sameFileAlias = args.sameFile && args.srcPath !== args.dstPath;
 
   if (!args.dryRun) {
     const writes: AtomicWriteRequest[] = [];
     // Destination before source: once renames begin, an interrupted cross-file
     // move can leave the payload duplicated in both files, never deleted from both.
-    if (dstChanged) {
+    if (dstChanged || (sameFileAlias && srcChanged)) {
       writes.push({ path: args.dstPath, bytes: next.dst });
     }
     if (srcChanged) {
@@ -272,11 +274,14 @@ export async function commitMove(args: CommitMoveArgs): Promise<string[]> {
   const changed: string[] = [];
   if (srcChanged) {
     changed.push(args.srcLabel);
+    if (sameFileAlias) {
+      changed.push(args.dstLabel);
+    }
   }
   if (dstChanged) {
     changed.push(args.dstLabel);
   }
-  return changed;
+  return unique(changed);
 }
 
 export function applyMove(file: Buffer, selection: MoveSelection): { src: Buffer; dst: Buffer } {

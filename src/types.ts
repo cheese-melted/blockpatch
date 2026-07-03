@@ -1,3 +1,6 @@
+import type { Buffer } from "node:buffer";
+import type { BlockPatchErrorCode } from "./errors";
+
 export interface BlockPatch {
   type: "move";
   id: string;
@@ -73,7 +76,7 @@ export interface MoveBlockResult extends ApplyResult {
 export interface BlockPatchJsonError {
   ok: false;
   error: {
-    code: string;
+    code: BlockPatchErrorCode;
     message: string;
     field?: string;
     path?: string;

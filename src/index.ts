@@ -2,6 +2,7 @@ export { applyPatchBytes, applyPatchFile, checkPatchBytes, checkPatchFile } from
 export { BlockPatchError } from "./errors";
 export { moveBlock } from "./move";
 export { parseBlockPatch } from "./parser";
+export type { BlockPatchErrorCode, BlockPatchErrorDetails, BlockPatchErrorRange } from "./errors";
 export type {
   ApplyOptions,
   ApplyResult,

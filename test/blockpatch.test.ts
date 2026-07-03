@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -28,6 +28,19 @@ async function symlinkOrSkip(target: string, path: string): Promise<boolean> {
   } catch (error) {
     const code = (error as { code?: string }).code;
     if (code === "EPERM" || code === "EACCES" || code === "ENOSYS") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function hardlinkOrSkip(existingPath: string, newPath: string): Promise<boolean> {
+  try {
+    await link(existingPath, newPath);
+    return true;
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "EPERM" || code === "EACCES" || code === "ENOSYS" || code === "EXDEV") {
       return false;
     }
     throw error;
@@ -832,6 +845,44 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
+  test("move --json honors dry_run field", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n",
+        target_after: "}\n",
+        dry_run: true
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      written: boolean;
+      status: string;
+    };
+    expect(stdout).toMatchObject({
+      ok: true,
+      changed: ["source.ts"],
+      written: false,
+      status: "applied"
+    });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
   test("move --explain prints dry-run JSON without modifying files", async () => {
     const cwd = await moveFixture();
     const before = await readFile(join(cwd, "source.ts"), "utf8");
@@ -1621,6 +1672,65 @@ describe("moveBlock API", () => {
     });
   });
 
+  test("treats hardlinked src and dst paths as the same file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-hardlink-"));
+    const sourcePath = join(cwd, "source.ts");
+    const aliasPath = join(cwd, "alias.ts");
+    const before = "alpha\nmove me\nomega\ntarget\n";
+    const expected = "alpha\nomega\ntarget\nmove me\n";
+    await writeFile(sourcePath, before);
+    if (!(await hardlinkOrSkip(sourcePath, aliasPath))) {
+      return;
+    }
+
+    const result = await moveBlock(
+      {
+        src: "source.ts",
+        dst: "alias.ts",
+        src_start: "move me",
+        src_end: "\n",
+        target_before: "target\n"
+      },
+      { cwd }
+    );
+
+    expect(result.changed).toEqual(["source.ts", "alias.ts"]);
+    expect(result.affected).toEqual(["source.ts", "alias.ts"]);
+    expect(result.written).toBe(true);
+    expect(result.status).toBe("applied");
+    expect(await readFile(sourcePath, "utf8")).toBe(expected);
+    expect(await readFile(aliasPath, "utf8")).toBe(expected);
+  });
+
+  test("move --diff keeps distinct hardlink labels in split sections", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-hardlink-diff-"));
+    const sourcePath = join(cwd, "source.ts");
+    const aliasPath = join(cwd, "alias.ts");
+    await writeFile(sourcePath, "alpha\nmove me\nomega\ntarget\n");
+    if (!(await hardlinkOrSkip(sourcePath, aliasPath))) {
+      return;
+    }
+
+    const result = await moveBlock(
+      {
+        src: "source.ts",
+        dst: "alias.ts",
+        src_start: "move me",
+        src_end: "\n",
+        target_before: "target\n"
+      },
+      { cwd, diff: true }
+    );
+
+    expect(result.patch).toContain("diff --blockpatch a/source.ts b/source.ts");
+    expect(result.patch).toContain("blockpatch move id=move-1 role=source payload-sha256=");
+    expect(result.patch).toContain("diff --blockpatch a/alias.ts b/alias.ts");
+    expect(result.patch).toContain("blockpatch move id=move-1 role=target payload-sha256=");
+    expect(result.patch).not.toContain("diff --blockpatch a/source.ts b/alias.ts");
+    expect(await readFile(sourcePath, "utf8")).toBe("alpha\nmove me\nomega\ntarget\n");
+    expect(await readFile(aliasPath, "utf8")).toBe("alpha\nmove me\nomega\ntarget\n");
+  });
+
   test("rejects unknown argument keys", async () => {
     await expect(
       moveBlock({
@@ -1805,6 +1915,27 @@ describe("format hardening", () => {
     );
   }
 
+  function splitPatchFor(payload: string, src: string, dst: string, sourceHunk: string, targetHunk: string): string {
+    const sha = createHash("sha256").update(payload).digest("hex");
+    return (
+      `diff --blockpatch a/${src} b/${src}\n` +
+      "blockpatch version 1\n" +
+      `blockpatch move id=move-1 role=source payload-sha256=${sha}\n` +
+      `--- a/${src}\n` +
+      `+++ b/${src}\n` +
+      "\n" +
+      sourceHunk +
+      "\n" +
+      `diff --blockpatch a/${dst} b/${dst}\n` +
+      "blockpatch version 1\n" +
+      `blockpatch move id=move-1 role=target payload-sha256=${sha}\n` +
+      `--- a/${dst}\n` +
+      `+++ b/${dst}\n` +
+      "\n" +
+      targetHunk
+    );
+  }
+
   test("overlap detection is not bypassed by a dot path", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-dot-path-"));
     await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\n");
@@ -1822,6 +1953,35 @@ describe("format hardening", () => {
     const before = await readFile(join(cwd, "file.txt"));
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("overlaps the source block");
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
+  });
+
+  test("hardlinked split patch paths use same-file semantics", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-hardlink-split-"));
+    const realPath = join(cwd, "real.txt");
+    const aliasPath = join(cwd, "alias.txt");
+    const before = "safe\nmove me\nomega\nanchor\n";
+    const expected = "safe\nomega\nanchor\nmove me\n";
+    await writeFile(realPath, before);
+    if (!(await hardlinkOrSkip(realPath, aliasPath))) {
+      return;
+    }
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      splitPatchFor(
+        "move me\n",
+        "real.txt",
+        "alias.txt",
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n safe\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n anchor\n+move me\n"
+      )
+    );
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.changed).toEqual(["real.txt", "alias.txt"]);
+    expect(result.affected).toEqual(["real.txt", "alias.txt"]);
+    expect(result.written).toBe(true);
+    expect(await readFile(realPath, "utf8")).toBe(expected);
+    expect(await readFile(aliasPath, "utf8")).toBe(expected);
   });
 
   test("patch paths may not escape the working directory", async () => {

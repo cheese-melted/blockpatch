@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { fail } from "./errors";

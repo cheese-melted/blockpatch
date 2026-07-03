@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { posix } from "node:path";
 import { boundedRanges, fail } from "./errors";
 import {
   buildMoveSelection,
@@ -11,7 +12,7 @@ import {
   type ByteRange,
   type MoveSelection
 } from "./engine";
-import { resolvePath } from "./paths";
+import { resolvePath, sameFileIdentity } from "./paths";
 import type { MoveBlockArgs, MoveBlockOptions, MoveBlockResult } from "./types";
 
 interface NormalizedMoveBlockArgs {
@@ -44,7 +45,7 @@ export async function moveBlock(
   const dryRun = options.dryRun ?? validated.dry_run ?? false;
   const srcPath = resolvePath(cwd, normalized.src, "source path");
   const dstPath = resolvePath(cwd, normalized.dst, "destination path");
-  const sameFile = srcPath === dstPath;
+  const sameFile = await sameFileIdentity(srcPath, dstPath);
   const srcOriginal = await readFile(srcPath);
   const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
   const source = findSource(srcOriginal, normalized);
@@ -61,8 +62,9 @@ export async function moveBlock(
       anchor: "expected_payload_sha256"
     });
   }
+  const samePatchLabel = samePatchPath(normalized.src, normalized.dst);
   const patch = options.diff
-    ? renderMovePatch(normalized, srcOriginal, dstOriginal, selection, sameFile, payloadSha256)
+    ? renderMovePatch(normalized, srcOriginal, dstOriginal, selection, sameFile && samePatchLabel, payloadSha256)
     : undefined;
   const writeSuppressed = dryRun || options.diff === true;
 
@@ -198,6 +200,10 @@ function targetAnchorName(args: NormalizedMoveBlockArgs): string {
     return "target_before+target_after";
   }
   return args.targetBefore.length > 0 ? "target_before" : "target_after";
+}
+
+function samePatchPath(left: string, right: string): boolean {
+  return posix.normalize(left) === posix.normalize(right);
 }
 
 function renderMovePatch(

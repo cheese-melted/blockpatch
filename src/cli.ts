@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { BlockPatchError } from "./errors";
 import { applyPatchBytes, applyPatchFile, checkPatchBytes, checkPatchFile } from "./engine";
 import { moveBlock } from "./move";
+import type { BlockPatchErrorCode } from "./errors";
 import type { ApplyResult, MoveBlockArgs, MoveBlockResult } from "./types";
 
 type Command = "apply" | "check" | "move" | "help" | "version";
@@ -41,7 +42,7 @@ async function main(argv: string[]): Promise<number> {
     const args = await loadMoveArgs(options);
     const result = await moveBlock(args, {
       cwd: options.cwd,
-      dryRun: options.dryRun,
+      dryRun: options.dryRun ? true : undefined,
       diff: options.diff
     });
 
@@ -50,7 +51,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
-    writeChangeResult(options, result, options.dryRun ? "would change" : "changed");
+    writeChangeResult(options, result, options.dryRun || args.dry_run === true ? "would change" : "changed");
     return 0;
   }
 
@@ -417,7 +418,7 @@ main(process.argv.slice(2)).then(
 );
 
 function writeError(
-  code: string,
+  code: BlockPatchErrorCode,
   message: string,
   jsonOutput: boolean,
   details: BlockPatchError["details"] = {}

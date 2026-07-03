@@ -1,4 +1,5 @@
 import { lstatSync, realpathSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fail } from "./errors";
 
@@ -29,6 +30,15 @@ export function resolvePath(cwd: string, path: string, label: string): string {
   }
 
   return resolved;
+}
+
+export async function sameFileIdentity(left: string, right: string): Promise<boolean> {
+  if (left === right) {
+    return true;
+  }
+
+  const [leftInfo, rightInfo] = await Promise.all([stat(left), stat(right)]);
+  return leftInfo.dev === rightInfo.dev && leftInfo.ino === rightInfo.ino;
 }
 
 function rejectSymlinkComponents(root: string, resolved: string, originalPath: string, label: string): void {

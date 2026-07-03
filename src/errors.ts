@@ -3,6 +3,29 @@ export interface BlockPatchErrorRange {
   end: number;
 }
 
+export type BlockPatchErrorCode =
+  | "parse_error"
+  | "invalid_path"
+  | "path_outside_cwd"
+  | "symlink_path"
+  | "source_not_found"
+  | "source_ambiguous"
+  | "target_not_found"
+  | "target_ambiguous"
+  | "payload_mismatch"
+  | "hash_mismatch"
+  | "target_overlaps_source"
+  | "already_applied"
+  | "invalid_move_args"
+  | "invalid_json"
+  | "missing_move_args"
+  | "unknown_command"
+  | "unknown_option"
+  | "invalid_option"
+  | "missing_option_value"
+  | "too_many_args"
+  | "unexpected_error";
+
 export interface BlockPatchErrorDetails {
   field?: string;
   path?: string;
@@ -15,10 +38,10 @@ export interface BlockPatchErrorDetails {
 const maxErrorRanges = 10;
 
 export class BlockPatchError extends Error {
-  readonly code: string;
+  readonly code: BlockPatchErrorCode;
   readonly details: BlockPatchErrorDetails;
 
-  constructor(code: string, message: string, details: BlockPatchErrorDetails = {}) {
+  constructor(code: BlockPatchErrorCode, message: string, details: BlockPatchErrorDetails = {}) {
     super(message);
     this.name = "BlockPatchError";
     this.code = code;
@@ -26,7 +49,7 @@ export class BlockPatchError extends Error {
   }
 }
 
-export function fail(code: string, message: string, details?: BlockPatchErrorDetails): never {
+export function fail(code: BlockPatchErrorCode, message: string, details?: BlockPatchErrorDetails): never {
   throw new BlockPatchError(code, message, details);
 }
 
