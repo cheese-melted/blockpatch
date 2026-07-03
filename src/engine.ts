@@ -22,6 +22,18 @@ export interface MoveSelection {
   payload: Buffer;
 }
 
+interface PendingMovePlan {
+  status: "pending";
+  selection: MoveSelection;
+}
+
+interface AlreadyAppliedMovePlan {
+  status: "already_applied";
+  details: MoveResultDetails;
+}
+
+type MovePlan = PendingMovePlan | AlreadyAppliedMovePlan;
+
 export interface CommitMoveArgs {
   srcPath: string;
   dstPath: string;
@@ -81,20 +93,34 @@ async function runPatchFile(patchPath: string, options: ApplyOptions): Promise<A
 async function runPatchBytes(patchBytes: Buffer, options: ApplyOptions): Promise<ApplyResult> {
   const cwd = resolve(options.cwd ?? process.cwd());
   const patch = parseBlockPatch(patchBytes, { stripComponents: options.stripComponents });
-  return applyMovePatch(patch, cwd, options.dryRun ?? false);
+  return applyMovePatch(patch, cwd, options.dryRun ?? false, options.reverse ?? false);
 }
 
 async function applyMovePatch(
   patch: BlockPatch,
   cwd: string,
-  dryRun: boolean
+  dryRun: boolean,
+  reverse: boolean
 ): Promise<ApplyResult> {
-  const srcPath = resolvePath(cwd, patch.src, "source path");
-  const dstPath = resolvePath(cwd, patch.dst, "destination path");
+  const effectivePatch = reverse ? reverseMovePatch(patch) : patch;
+  const srcPath = resolvePath(cwd, effectivePatch.src, "source path");
+  const dstPath = resolvePath(cwd, effectivePatch.dst, "destination path");
   const sameFile = srcPath === dstPath;
   const srcOriginal = await readFile(srcPath);
   const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
-  const selection = selectMove(srcOriginal, dstOriginal, patch, sameFile);
+  const plan = selectMovePlan(srcOriginal, dstOriginal, effectivePatch, sameFile);
+
+  if (plan.status === "already_applied") {
+    return {
+      changed: [],
+      affected: unique([effectivePatch.src, effectivePatch.dst]),
+      noop: true,
+      status: "already_applied",
+      moves: [plan.details]
+    };
+  }
+
+  const selection = plan.selection;
   const changed = await commitMove({
     srcPath,
     dstPath,
@@ -103,23 +129,38 @@ async function applyMovePatch(
     srcOriginal,
     dstOriginal,
     selection,
-    srcLabel: patch.src,
-    dstLabel: patch.dst
+    srcLabel: effectivePatch.src,
+    dstLabel: effectivePatch.dst
   });
 
   return {
     changed,
-    affected: unique([patch.src, patch.dst]),
+    affected: unique([effectivePatch.src, effectivePatch.dst]),
     noop: changed.length === 0,
+    status: changed.length === 0 ? "noop" : "applied",
     moves: [
       moveResultDetails({
-        id: patch.id,
-        src: patch.src,
-        dst: patch.dst,
-        payloadSha256: patch.payloadSha256,
+        id: effectivePatch.id,
+        src: effectivePatch.src,
+        dst: effectivePatch.dst,
+        payloadSha256: effectivePatch.payloadSha256,
         selection
       })
     ]
+  };
+}
+
+function reverseMovePatch(patch: BlockPatch): BlockPatch {
+  return {
+    ...patch,
+    src: patch.dst,
+    dst: patch.src,
+    sourceBefore: patch.target.before,
+    sourceAfter: patch.target.after,
+    target: {
+      before: patch.sourceBefore,
+      after: patch.sourceAfter
+    }
   };
 }
 
@@ -129,9 +170,59 @@ export function selectMove(
   patch: BlockPatch,
   sameFile: boolean
 ): MoveSelection {
-  const source = findSourceRange(srcFile, patch);
-  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, patch.dst);
+  const source = findSourceRange(srcFile, dstFile, patch);
+  if (source === undefined) {
+    fail("already_applied", `Patch is already applied in ${patch.dst}`, {
+      path: patch.dst,
+      phase: "target",
+      anchor: "blockpatch-target"
+    });
+  }
+  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, patch.dst, {
+    phase: "target",
+    anchor: "blockpatch-target"
+  });
   return buildMoveSelection(srcFile, source, target, sameFile, patch.dst);
+}
+
+function selectMovePlan(
+  srcFile: Buffer,
+  dstFile: Buffer,
+  patch: BlockPatch,
+  sameFile: boolean
+): MovePlan {
+  const source = findSourceRange(srcFile, dstFile, patch);
+  if (source === undefined) {
+    const target = findAlreadyAppliedTargetSelection(dstFile, patch);
+    if (target === undefined) {
+      fail("source_not_found", `Source anchors were not found in ${patch.src}`, {
+        path: patch.src,
+        phase: "source",
+        anchor: "blockpatch-source",
+        matches: 0
+      });
+    }
+    return {
+      status: "already_applied",
+      details: alreadyAppliedMoveResultDetails({
+        id: patch.id,
+        src: patch.src,
+        dst: patch.dst,
+        payloadSha256: patch.payloadSha256,
+        payload: patch.sourcePayload,
+        target
+      })
+    };
+  }
+
+  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, patch.dst, {
+    phase: "target",
+    anchor: "blockpatch-target"
+  });
+  return {
+    status: "pending",
+    selection: buildMoveSelection(srcFile, source, target, sameFile, patch.dst)
+  };
 }
 
 export function buildMoveSelection(
@@ -143,7 +234,9 @@ export function buildMoveSelection(
 ): MoveSelection {
   if (sameFile && rangesOverlap(source, target.range)) {
     fail("target_overlaps_source", `Target anchor for ${dstLabel} overlaps the source block`, {
-      path: dstLabel
+      path: dstLabel,
+      phase: "target",
+      anchor: "blockpatch-target"
     });
   }
 
@@ -217,9 +310,9 @@ export function applyCrossFileMove(
   };
 }
 
-function findSourceRange(file: Buffer, patch: BlockPatch): ByteRange {
+function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): ByteRange | undefined {
   const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
-  const fullMatches = indexesOf(file, fullSource);
+  const fullMatches = indexesOf(srcFile, fullSource);
 
   if (fullMatches.length === 1) {
     const start = fullMatches[0] + patch.sourceBefore.length;
@@ -229,25 +322,72 @@ function findSourceRange(file: Buffer, patch: BlockPatch): ByteRange {
   if (fullMatches.length > 1) {
     fail("source_ambiguous", `Source block is ambiguous in ${patch.src}; matched ${fullMatches.length} locations`, {
       path: patch.src,
+      phase: "source",
+      anchor: "blockpatch-source",
       matches: fullMatches.length
     });
   }
 
-  const envelopes = findSourceEnvelopes(file, patch);
+  const alreadyApplied = findAlreadyAppliedTargetSelection(dstFile, patch);
+  if (alreadyApplied !== undefined) {
+    return undefined;
+  }
+
+  const envelopes = findSourceEnvelopes(srcFile, patch);
   if (envelopes.length === 1) {
     fail("payload_mismatch", `Source payload does not match located source anchors in ${patch.src}`, {
-      path: patch.src
+      path: patch.src,
+      phase: "payload",
+      anchor: "blockpatch-source"
     });
   }
 
   if (envelopes.length > 1) {
     fail("source_ambiguous", `Source anchors are ambiguous in ${patch.src}; matched ${envelopes.length} locations`, {
       path: patch.src,
+      phase: "source",
+      anchor: "blockpatch-source",
       matches: envelopes.length
     });
   }
 
-  fail("source_not_found", `Source anchors were not found in ${patch.src}`, { path: patch.src, matches: 0 });
+  fail("source_not_found", `Source anchors were not found in ${patch.src}`, {
+    path: patch.src,
+    phase: "source",
+    anchor: "blockpatch-source",
+    matches: 0
+  });
+}
+
+function findAlreadyAppliedTargetSelection(
+  file: Buffer,
+  patch: BlockPatch
+): TargetSelection | undefined {
+  const alreadyApplied = Buffer.concat([patch.target.before, patch.sourcePayload, patch.target.after]);
+  const matches = indexesOf(file, alreadyApplied);
+
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  if (matches.length > 1) {
+    fail(
+      "target_ambiguous",
+      `Already-applied target is ambiguous in ${patch.dst}; matched ${matches.length} locations`,
+      {
+        path: patch.dst,
+        phase: "target",
+        anchor: "blockpatch-target",
+        matches: matches.length
+      }
+    );
+  }
+
+  const start = matches[0];
+  return {
+    range: { start, end: start + alreadyApplied.length },
+    insertIndex: start + patch.target.before.length
+  };
 }
 
 function findSourceEnvelopes(file: Buffer, patch: BlockPatch): ByteRange[] {
@@ -270,18 +410,24 @@ export function findTargetSelection(
   file: Buffer,
   before: Buffer,
   after: Buffer,
-  dstLabel: string
+  dstLabel: string,
+  details: { phase?: string; anchor?: string } = {}
 ): TargetSelection {
   const anchor = Buffer.concat([before, after]);
   const matches = indexesOf(file, anchor);
 
   if (matches.length === 0) {
-    fail("target_not_found", `Target anchor was not found in ${dstLabel}`, { path: dstLabel, matches: 0 });
+    fail("target_not_found", `Target anchor was not found in ${dstLabel}`, {
+      path: dstLabel,
+      ...details,
+      matches: 0
+    });
   }
 
   if (matches.length > 1) {
     fail("target_ambiguous", `Target anchor is ambiguous in ${dstLabel}; matched ${matches.length} locations`, {
       path: dstLabel,
+      ...details,
       matches: matches.length
     });
   }
@@ -328,6 +474,26 @@ export function moveResultDetails(args: {
     source_range: args.selection.source,
     target_range: args.selection.target.range,
     insert_index: args.selection.target.insertIndex
+  };
+}
+
+function alreadyAppliedMoveResultDetails(args: {
+  id: string;
+  src: string;
+  dst: string;
+  payloadSha256: string;
+  payload: Buffer;
+  target: TargetSelection;
+}): MoveResultDetails {
+  return {
+    id: args.id,
+    src: args.src,
+    dst: args.dst,
+    payload_sha256: args.payloadSha256,
+    payload_bytes: args.payload.length,
+    source_range: null,
+    target_range: args.target.range,
+    insert_index: args.target.insertIndex
   };
 }
 

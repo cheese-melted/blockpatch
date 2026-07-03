@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { moveBlock } from "../src/move";
 import { BlockPatchError } from "../src/errors";
 
 const fixtureRoot = join(import.meta.dir, "fixtures");
+const systemPatchAvailable = hasSystemPatch();
 
 async function fixtureCase(name: string): Promise<string> {
   const cwd = await mkdtemp(join(tmpdir(), `blockpatch-${name}-`));
@@ -84,6 +86,7 @@ describe("blockpatch golden fixtures", () => {
     expect(result.changed).toEqual(["file.txt"]);
     expect(result.affected).toEqual(["file.txt"]);
     expect(result.noop).toBe(false);
+    expect(result.status).toBe("applied");
     expect(result.moves).toHaveLength(1);
     expect(result.moves[0]).toMatchObject({
       id: "move-1",
@@ -93,6 +96,50 @@ describe("blockpatch golden fixtures", () => {
       payload_bytes: "move me\n".length
     });
     expect(after).toEqual(before);
+  });
+
+  test("reverse apply restores a successful move", async () => {
+    const cwd = await fixtureCase("success");
+    const before = await readFile(join(cwd, "file.txt"));
+    await applyPatchFile("patch.blockpatch", { cwd });
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
+    expect(result.changed).toEqual(["file.txt"]);
+    expect(result.affected).toEqual(["file.txt"]);
+    expect(result.status).toBe("applied");
+    expect(result.moves[0]).toMatchObject({
+      src: "file.txt",
+      dst: "file.txt",
+      payload_sha256: "f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e"
+    });
+  });
+
+  test("reverse check validates without modifying an applied file", async () => {
+    const cwd = await fixtureCase("success");
+    await applyPatchFile("patch.blockpatch", { cwd });
+    const applied = await readFile(join(cwd, "file.txt"));
+
+    const result = await checkPatchFile("patch.blockpatch", { cwd, reverse: true });
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(applied);
+    expect(result.changed).toEqual(["file.txt"]);
+    expect(result.status).toBe("applied");
+  });
+
+  test("already-reversed patch is a reverse no-op with explicit status", async () => {
+    const cwd = await fixtureCase("success");
+    const before = await readFile(join(cwd, "file.txt"));
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
+    expect(result.changed).toEqual([]);
+    expect(result.noop).toBe(true);
+    expect(result.status).toBe("already_applied");
+    expect(result.moves[0]).toMatchObject({
+      src: "file.txt",
+      dst: "file.txt",
+      source_range: null
+    });
   });
 });
 
@@ -210,7 +257,74 @@ describe("byte preservation", () => {
     expect(result.changed).toEqual([]);
     expect(result.affected).toEqual(["file.txt"]);
     expect(result.noop).toBe(true);
+    expect(result.status).toBe("noop");
     expect(result.moves[0].source_range).toEqual({ start: "alpha\n".length, end: "alpha\nmove me\n".length });
+  });
+
+  test("already-applied same-file patch is a no-op with explicit status", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-already-applied-"));
+    const alreadyApplied = "alpha\nomega\ntarget\nmove me\ntail\n";
+    await writeFile(join(cwd, "file.txt"), alreadyApplied);
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      "diff --blockpatch a/file.txt b/file.txt\n" +
+        "blockpatch version 1\n" +
+        "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
+        "--- a/file.txt\n" +
+        "+++ b/file.txt\n" +
+        "\n" +
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
+        " alpha\n" +
+        "-move me\n" +
+        " omega\n" +
+        "\n" +
+        "@@ -3,2 +3,3 @@ blockpatch-target id=move-1\n" +
+        " target\n" +
+        "+move me\n" +
+        " tail\n"
+    );
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe(alreadyApplied);
+    expect(result.changed).toEqual([]);
+    expect(result.affected).toEqual(["file.txt"]);
+    expect(result.noop).toBe(true);
+    expect(result.status).toBe("already_applied");
+    expect(result.moves[0]).toMatchObject({
+      id: "move-1",
+      src: "file.txt",
+      dst: "file.txt",
+      payload_sha256: "f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e",
+      payload_bytes: "move me\n".length,
+      source_range: null
+    });
+  });
+
+  test("ambiguous already-applied target is rejected", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-already-applied-ambiguous-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nomega\ntarget\nmove me\ntail\ntarget\nmove me\ntail\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      "diff --blockpatch a/file.txt b/file.txt\n" +
+        "blockpatch version 1\n" +
+        "blockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n" +
+        "--- a/file.txt\n" +
+        "+++ b/file.txt\n" +
+        "\n" +
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
+        " alpha\n" +
+        "-move me\n" +
+        " omega\n" +
+        "\n" +
+        "@@ -3,2 +3,3 @@ blockpatch-target id=move-1\n" +
+        " target\n" +
+        "+move me\n" +
+        " tail\n"
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "Already-applied target is ambiguous"
+    );
   });
 
   test("source hunk can start at the beginning of a file", async () => {
@@ -383,6 +497,62 @@ describe("CLI", () => {
     expect(await new Response(dryRun.stderr).text()).toBe("");
     const after = await readFile(join(cwd, "file.txt"));
     expect(after).toEqual(before);
+  });
+
+  test("supports apply --reverse and check -R", async () => {
+    const cwd = await fixtureCase("success");
+    const before = await readFile(join(cwd, "file.txt"));
+    await applyPatchFile("patch.blockpatch", { cwd });
+    const applied = await readFile(join(cwd, "file.txt"));
+
+    const check = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "-R", "patch.blockpatch", "--cwd", cwd],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    expect(await check.exited).toBe(0);
+    expect(await new Response(check.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(applied);
+
+    const reverse = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "--reverse", "patch.blockpatch", "--cwd", cwd],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    expect(await reverse.exited).toBe(0);
+    expect(await new Response(reverse.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
+  });
+
+  test("apply --explain prints dry-run JSON without modifying files", async () => {
+    const cwd = await fixtureCase("success");
+    const before = await readFile(join(cwd, "file.txt"));
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "patch.blockpatch", "--explain", "--cwd", cwd],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      affected: string[];
+      status: string;
+      moves: Array<{ payload_sha256: string; source_range: { start: number; end: number } }>;
+    };
+    expect(stdout).toMatchObject({
+      ok: true,
+      changed: ["file.txt"],
+      affected: ["file.txt"],
+      status: "applied"
+    });
+    expect(stdout.moves[0]).toMatchObject({
+      payload_sha256: "f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e",
+      source_range: { start: "alpha\n".length, end: "alpha\nmove me\n".length }
+    });
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
   });
 
   test("supports apply from stdin", async () => {
@@ -559,18 +729,121 @@ describe("CLI", () => {
       changed: string[];
       affected: string[];
       noop: boolean;
+      status: string;
       moves: Array<{ src: string; dst: string; payload_sha256: string; payload_bytes: number }>;
     };
     expect(stdout.ok).toBe(true);
     expect(stdout.changed).toEqual(["source.ts"]);
     expect(stdout.affected).toEqual(["source.ts"]);
     expect(stdout.noop).toBe(false);
+    expect(stdout.status).toBe("applied");
     expect(stdout.moves[0]).toMatchObject({
       src: "source.ts",
       dst: "source.ts",
       payload_sha256: "a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6",
       payload_bytes: "function movedThing() {\n  return 42;\n}\n".length
     });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
+  test("move --explain prints dry-run JSON without modifying files", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--explain", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n",
+        target_after: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      affected: string[];
+      status: string;
+      moves: Array<{
+        payload_sha256: string;
+        source_range: { start: number; end: number };
+        target_range: { start: number; end: number };
+        insert_index: number;
+      }>;
+    };
+    expect(stdout).toMatchObject({
+      ok: true,
+      changed: ["source.ts"],
+      affected: ["source.ts"],
+      status: "applied"
+    });
+    expect(stdout.moves[0]).toMatchObject({
+      payload_sha256: "a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6",
+      source_range: { start: "alpha\n".length, end: "alpha\nfunction movedThing() {\n  return 42;\n}\n".length },
+      target_range: {
+        start: "alpha\nfunction movedThing() {\n  return 42;\n}\nomega\n".length,
+        end: before.length
+      },
+      insert_index: "alpha\nfunction movedThing() {\n  return 42;\n}\nomega\nclass Target {\n".length
+    });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
+  test("move --diff --json-output returns the reviewable patch without writing", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--diff", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n",
+        target_after: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      affected: string[];
+      noop: boolean;
+      status: string;
+      patch: string;
+      moves: Array<{ payload_sha256: string; source_range: { start: number; end: number } }>;
+    };
+    expect(stdout).toMatchObject({
+      ok: true,
+      changed: ["source.ts"],
+      affected: ["source.ts"],
+      noop: false,
+      status: "applied"
+    });
+    expect(stdout.moves[0]).toMatchObject({
+      payload_sha256: "a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6",
+      source_range: { start: "alpha\n".length, end: "alpha\nfunction movedThing() {\n  return 42;\n}\n".length }
+    });
+    expect(stdout.patch).toContain("diff --blockpatch a/source.ts b/source.ts");
+    expect(stdout.patch).toContain("blockpatch move id=move-1 payload-sha256=");
+    expect(stdout.patch).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
+    expect(stdout.patch).toContain("@@ -6,2 +3,5 @@ blockpatch-target id=move-1");
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
@@ -626,12 +899,14 @@ describe("CLI", () => {
     expect(await new Response(proc.stdout).text()).toBe("");
     const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
       ok: boolean;
-      error: { code: string; field: string };
+      error: { code: string; field: string; phase: string; anchor: string };
     };
     expect(stderr.ok).toBe(false);
     expect(stderr.error).toMatchObject({
       code: "hash_mismatch",
-      field: "expected_payload_sha256"
+      field: "expected_payload_sha256",
+      phase: "payload",
+      anchor: "expected_payload_sha256"
     });
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
@@ -802,6 +1077,40 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe(
       "class Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
     );
+
+    const retry = await applyPatchFile("generated.blockpatch", { cwd });
+    expect(retry.changed).toEqual([]);
+    expect(retry.affected).toEqual(["source.ts", "target.ts"]);
+    expect(retry.noop).toBe(true);
+    expect(retry.status).toBe("already_applied");
+    expect(retry.moves[0]).toMatchObject({
+      src: "source.ts",
+      dst: "target.ts",
+      source_range: null,
+      payload_sha256: "a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6"
+    });
+
+    const reversed = await applyPatchFile("generated.blockpatch", { cwd, reverse: true });
+    expect(reversed.changed).toEqual(["target.ts", "source.ts"]);
+    expect(reversed.affected).toEqual(["target.ts", "source.ts"]);
+    expect(reversed.status).toBe("applied");
+    expect(reversed.moves[0]).toMatchObject({
+      src: "target.ts",
+      dst: "source.ts",
+      payload_sha256: "a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6"
+    });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe("before\nfunction movedThing() {\n  return 42;\n}\nafter\n");
+    expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe("class Target {\n}\n");
+
+    const reverseRetry = await applyPatchFile("generated.blockpatch", { cwd, reverse: true });
+    expect(reverseRetry.changed).toEqual([]);
+    expect(reverseRetry.affected).toEqual(["target.ts", "source.ts"]);
+    expect(reverseRetry.status).toBe("already_applied");
+    expect(reverseRetry.moves[0]).toMatchObject({
+      src: "target.ts",
+      dst: "source.ts",
+      source_range: null
+    });
   });
 
   test("old single-section cross-file patch shape is rejected", async () => {
@@ -986,12 +1295,14 @@ describe("CLI", () => {
     expect(await proc.exited).toBe(1);
     const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
       ok: boolean;
-      error: { code: string; path: string; matches: number };
+      error: { code: string; path: string; phase: string; anchor: string; matches: number };
     };
     expect(stderr.ok).toBe(false);
     expect(stderr.error).toMatchObject({
       code: "target_ambiguous",
       path: "source.ts",
+      phase: "target",
+      anchor: "target_before",
       matches: 2
     });
   });
@@ -1007,6 +1318,90 @@ describe("CLI", () => {
     expect(await proc.exited).toBe(1);
     expect(await new Response(proc.stdout).text()).toBe("");
     expect(await new Response(proc.stderr).text()).toContain("Unknown option: --unsafe-paths");
+  });
+});
+
+describe("patch --fuzz=0 conformance", () => {
+  test("generated same-file patch applies with blockpatch apply", async () => {
+    const patchText = await generateConformancePatch();
+    const cwd = await conformanceFixture();
+    await writeFile(join(cwd, "generated.blockpatch"), patchText);
+
+    await applyPatchFile("generated.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(conformanceAfter);
+  });
+
+  test.skipIf(!systemPatchAvailable)(
+    "generated same-file patch applies with system patch --fuzz=0",
+    async () => {
+      const patchText = await generateConformancePatch();
+      const cwd = await conformanceFixture();
+      await writeFile(join(cwd, "generated.blockpatch"), patchText);
+
+      const proc = Bun.spawn({
+        cmd: ["patch", "--fuzz=0", "-p1", "--batch", "-i", "generated.blockpatch"],
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+
+      expect(await proc.exited).toBe(0);
+      expect(await new Response(proc.stderr).text()).toBe("");
+      expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(conformanceAfter);
+    }
+  );
+
+  test("line-number drift applies when exact context is unique", async () => {
+    const patchText = driftConformanceLineNumbers(await generateConformancePatch());
+    const cwd = await conformanceFixture();
+    await writeFile(join(cwd, "generated.blockpatch"), patchText);
+
+    await applyPatchFile("generated.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(conformanceAfter);
+  });
+
+  test.skipIf(!systemPatchAvailable)(
+    "line-number drift applies with system patch --fuzz=0 when context is exact",
+    async () => {
+      const patchText = driftConformanceLineNumbers(await generateConformancePatch());
+      const cwd = await conformanceFixture();
+      await writeFile(join(cwd, "generated.blockpatch"), patchText);
+
+      const proc = Bun.spawn({
+        cmd: ["patch", "--fuzz=0", "-p1", "--batch", "-i", "generated.blockpatch"],
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+
+      expect(await proc.exited).toBe(0);
+      expect(await new Response(proc.stderr).text()).toBe("");
+      expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(conformanceAfter);
+    }
+  );
+
+  test("duplicated context is rejected by blockpatch", async () => {
+    const patchText = await generateConformancePatch();
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-conformance-duplicate-"));
+    await writeFile(
+      join(cwd, "source.ts"),
+      "intro\nfunction movedThing() {\n  return 42;\n}\nmid\ngap\nclass Target {\n}\nclass Target {\n}\noutro\n"
+    );
+    await writeFile(join(cwd, "generated.blockpatch"), patchText);
+
+    await expect(applyPatchFile("generated.blockpatch", { cwd })).rejects.toThrow(
+      "Target anchor is ambiguous"
+    );
+  });
+
+  test("malformed line counts are rejected by blockpatch", async () => {
+    const patchText = corruptConformanceSourceCount(await generateConformancePatch());
+    const cwd = await conformanceFixture();
+    await writeFile(join(cwd, "generated.blockpatch"), patchText);
+
+    await expect(applyPatchFile("generated.blockpatch", { cwd })).rejects.toThrow(
+      "Hunk line counts do not match header"
+    );
   });
 });
 
@@ -1052,6 +1447,7 @@ describe("moveBlock API", () => {
     expect(result.changed).toEqual([]);
     expect(result.affected).toEqual(["source.ts"]);
     expect(result.noop).toBe(true);
+    expect(result.status).toBe("noop");
     expect(result.moves[0]).toMatchObject({
       id: "move-1",
       src: "source.ts",
@@ -1199,7 +1595,7 @@ describe("moveBlock API", () => {
 
     expect(result.patch).toContain("blockpatch version 1");
     expect(result.patch).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
-    expect(result.patch).toContain("@@ -6,1 +3,4 @@ blockpatch-target id=move-1");
+    expect(result.patch).toContain("@@ -6,2 +3,5 @@ blockpatch-target id=move-1");
   });
 });
 
@@ -1428,4 +1824,89 @@ async function moveFixture(): Promise<string> {
     "alpha\nfunction movedThing() {\n  return 42;\n}\nomega\nclass Target {\n}\n"
   );
   return cwd;
+}
+
+const conformanceBefore = "intro\nfunction movedThing() {\n  return 42;\n}\nmid\ngap\nclass Target {\n}\noutro\n";
+const conformanceAfter = "intro\nmid\ngap\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\noutro\n";
+
+function hasSystemPatch(): boolean {
+  try {
+    const version = Bun.spawnSync({
+      cmd: ["patch", "--version"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    if (version.exitCode !== 0) {
+      return false;
+    }
+
+    const cwd = mkdtempSync(join(tmpdir(), "blockpatch-system-patch-"));
+    try {
+      writeFileSync(join(cwd, "file.txt"), "alpha\nomega\n");
+      writeFileSync(
+        join(cwd, "probe.blockpatch"),
+        "diff --blockpatch a/file.txt b/file.txt\n" +
+          "blockpatch version 1\n" +
+          "blockpatch move id=move-1 payload-sha256=0000000000000000000000000000000000000000000000000000000000000000\n" +
+          "--- a/file.txt\n" +
+          "+++ b/file.txt\n" +
+          "\n" +
+          "@@ -1,2 +1,2 @@ blockpatch-source id=move-1\n" +
+          "-alpha\n" +
+          "+beta\n" +
+          " omega\n"
+      );
+
+      const probe = Bun.spawnSync({
+        cmd: ["patch", "--fuzz=0", "-p1", "--batch", "-i", "probe.blockpatch"],
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+
+      return probe.exitCode === 0 && readFileSync(join(cwd, "file.txt"), "utf8") === "beta\nomega\n";
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function conformanceFixture(): Promise<string> {
+  const cwd = await mkdtemp(join(tmpdir(), "blockpatch-conformance-"));
+  await writeFile(join(cwd, "source.ts"), conformanceBefore);
+  return cwd;
+}
+
+async function generateConformancePatch(): Promise<string> {
+  const cwd = await conformanceFixture();
+  const result = await moveBlock(
+    {
+      src: "source.ts",
+      src_start: "function movedThing() {\n",
+      src_end: "}\n",
+      target_before: "class Target {\n"
+    },
+    { cwd, diff: true }
+  );
+
+  if (result.patch === undefined) {
+    throw new Error("Expected moveBlock diff output");
+  }
+  return result.patch;
+}
+
+function driftConformanceLineNumbers(patchText: string): string {
+  return patchText
+    .replace(/@@ -\d+(,\d+) \+\d+(,\d+) @@ blockpatch-source id=move-1/, "@@ -90$1 +90$2 @@ blockpatch-source id=move-1")
+    .replace(/@@ -\d+(,\d+) \+\d+(,\d+) @@ blockpatch-target id=move-1/, "@@ -120$1 +120$2 @@ blockpatch-target id=move-1");
+}
+
+function corruptConformanceSourceCount(patchText: string): string {
+  return patchText.replace(
+    /@@ -(\d+),(\d+) \+(\d+),(\d+) @@ blockpatch-source id=move-1/,
+    (_header, oldStart: string, oldCount: string, newStart: string, newCount: string) =>
+      `@@ -${oldStart},${Number(oldCount) + 1} +${newStart},${newCount} @@ blockpatch-source id=move-1`
+  );
 }

@@ -146,12 +146,18 @@ function buildBlockPatch(
   const targetPayload = payloadBytes(targetHunk, "+");
 
   if (!source.payload.equals(targetPayload)) {
-    fail("payload_mismatch", "Target added payload does not match source removed payload");
+    fail("payload_mismatch", "Target added payload does not match source removed payload", {
+      phase: "payload",
+      anchor: "blockpatch-target"
+    });
   }
 
   const actualHash = createHash("sha256").update(source.payload).digest("hex");
   if (actualHash !== payloadSha256) {
-    fail("hash_mismatch", "payload-sha256 does not match moved payload");
+    fail("hash_mismatch", "payload-sha256 does not match moved payload", {
+      phase: "payload",
+      anchor: "payload-sha256"
+    });
   }
 
   return {

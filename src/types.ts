@@ -18,6 +18,7 @@ export interface TargetAnchor {
 export interface ApplyOptions {
   cwd?: string;
   dryRun?: boolean;
+  reverse?: boolean;
   stripComponents?: number;
 }
 
@@ -32,15 +33,18 @@ export interface MoveResultDetails {
   dst: string;
   payload_sha256: string;
   payload_bytes: number;
-  source_range: ByteRangeResult;
+  source_range: ByteRangeResult | null;
   target_range: ByteRangeResult;
   insert_index: number;
 }
+
+export type ApplyStatus = "applied" | "noop" | "already_applied";
 
 export interface ApplyResult {
   changed: string[];
   affected: string[];
   noop: boolean;
+  status: ApplyStatus;
   moves: MoveResultDetails[];
 }
 
@@ -72,6 +76,8 @@ export interface BlockPatchJsonError {
     message: string;
     field?: string;
     path?: string;
+    phase?: string;
+    anchor?: string;
     matches?: number;
   };
 }

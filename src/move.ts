@@ -48,12 +48,17 @@ export async function moveBlock(
   const srcOriginal = await readFile(srcPath);
   const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
   const source = findSource(srcOriginal, normalized);
-  const target = findTargetSelection(dstOriginal, normalized.targetBefore, normalized.targetAfter, normalized.dst);
+  const target = findTargetSelection(dstOriginal, normalized.targetBefore, normalized.targetAfter, normalized.dst, {
+    phase: "target",
+    anchor: targetAnchorName(normalized)
+  });
   const selection = buildMoveSelection(srcOriginal, source, target, sameFile, normalized.dst);
   const payloadSha256 = createHash("sha256").update(selection.payload).digest("hex");
   if (validated.expected_payload_sha256 !== undefined && validated.expected_payload_sha256 !== payloadSha256) {
     fail("hash_mismatch", "expected_payload_sha256 does not match selected source payload", {
-      field: "expected_payload_sha256"
+      field: "expected_payload_sha256",
+      phase: "payload",
+      anchor: "expected_payload_sha256"
     });
   }
   const patch = options.diff
@@ -76,6 +81,7 @@ export async function moveBlock(
     changed,
     affected: unique([normalized.src, normalized.dst]),
     noop: changed.length === 0,
+    status: changed.length === 0 ? "noop" : "applied",
     moves: [
       moveResultDetails({
         id: "move-1",
@@ -165,16 +171,30 @@ function findSource(file: Buffer, args: NormalizedMoveBlockArgs): ByteRange {
   }
 
   if (ranges.length === 0) {
-    fail("source_not_found", `Source delimiters were not found in ${args.src}`, { path: args.src, matches: 0 });
+    fail("source_not_found", `Source delimiters were not found in ${args.src}`, {
+      path: args.src,
+      phase: "source",
+      anchor: "src_start/src_end",
+      matches: 0
+    });
   }
   if (ranges.length > 1) {
     fail("source_ambiguous", `Source delimiters are ambiguous in ${args.src}; matched ${ranges.length} locations`, {
       path: args.src,
+      phase: "source",
+      anchor: "src_start/src_end",
       matches: ranges.length
     });
   }
 
   return ranges[0];
+}
+
+function targetAnchorName(args: NormalizedMoveBlockArgs): string {
+  if (args.targetBefore.length > 0 && args.targetAfter.length > 0) {
+    return "target_before+target_after";
+  }
+  return args.targetBefore.length > 0 ? "target_before" : "target_after";
 }
 
 function renderMovePatch(
@@ -187,9 +207,16 @@ function renderMovePatch(
 ): string {
   const id = "move-1";
   const { source, target, payload } = selection;
-  const targetAnchor = Buffer.concat([args.targetBefore, args.targetAfter]);
   const sourceBefore = adjacentLineBefore(srcOriginal, source.start);
   const sourceAfter = adjacentLineAfter(srcOriginal, source.end);
+  const targetBefore =
+    args.targetBefore.length === 0
+      ? adjacentLineBefore(dstOriginal, target.range.start)
+      : args.targetBefore;
+  const targetAfter =
+    args.targetAfter.length === 0
+      ? adjacentLineAfter(dstOriginal, target.range.end)
+      : args.targetAfter;
   const payloadLines = countLines(payload);
 
   const sourceHunkStart = source.start - sourceBefore.length;
@@ -201,10 +228,11 @@ function renderMovePatch(
       : sourceOldStart;
   const sourceNewCount = sourceOldCount - payloadLines;
 
-  const targetOldStart = lineNumberAt(dstOriginal, target.range.start);
-  const targetOldCount = countLines(targetAnchor);
+  const targetHunkStart = target.insertIndex - targetBefore.length;
+  const targetOldStart = lineNumberAt(dstOriginal, targetHunkStart);
+  const targetOldCount = countLines(targetBefore) + countLines(targetAfter);
   const targetNewStart =
-    sameFile && source.end <= target.range.start ? targetOldStart - payloadLines : targetOldStart;
+    sameFile && source.end <= targetHunkStart ? targetOldStart - payloadLines : targetOldStart;
   const targetNewCount = targetOldCount + payloadLines;
 
   const sourceBody = joinPatchChunks([
@@ -213,9 +241,9 @@ function renderMovePatch(
     renderHunkBytes(sourceAfter, " ")
   ]);
   const targetBody = joinPatchChunks([
-    renderHunkBytes(args.targetBefore, " "),
+    renderHunkBytes(targetBefore, " "),
     renderHunkBytes(payload, "+"),
-    renderHunkBytes(args.targetAfter, " ")
+    renderHunkBytes(targetAfter, " ")
   ]);
 
   const sourceHunkHeader =
@@ -242,7 +270,7 @@ function renderMovePatch(
       "",
       targetHunkHeader,
       targetBody
-    ].join("\n");
+    ].join("\n") + "\n";
   }
 
   return [
@@ -254,10 +282,9 @@ function renderMovePatch(
     "",
     sourceHunkHeader,
     sourceBody,
-    "",
     targetHunkHeader,
     targetBody
-  ].join("\n");
+  ].join("\n") + "\n";
 }
 
 function lineNumberAt(file: Buffer, byteIndex: number): number {

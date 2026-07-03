@@ -34,6 +34,8 @@ node dist/cli.js version
 blockpatch check patch.blockpatch
 blockpatch apply patch.blockpatch
 blockpatch apply patch.blockpatch --dry-run
+blockpatch apply patch.blockpatch --reverse
+blockpatch check patch.blockpatch -R
 blockpatch apply - < patch.blockpatch
 blockpatch apply < patch.blockpatch
 blockpatch apply -i patch.blockpatch
@@ -44,7 +46,7 @@ blockpatch move --json move.json
 blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-end $'\n}\n' --target-before $'class Target {\n'
 ```
 
-`check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing.
+`check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing. `-R`/`--reverse` moves the verified payload back from the target location to the source location; it works with both `check` and `apply`.
 
 Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths and `..` escapes are rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
 
@@ -87,7 +89,15 @@ blockpatch move \
   --target-after $'}\n'
 ```
 
-Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output.
+Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output. `--explain` is a dry-run JSON alias for `--dry-run --json-output`; it reuses the existing `moves` byte ranges and payload hash fields instead of introducing a separate planner.
+
+For agents, the canonical planning handshake is:
+
+```sh
+blockpatch move --json - --diff --json-output
+```
+
+That command validates the source delimiters and target anchors, computes byte ranges, hashes the selected payload, lists affected files, and returns the exact reviewable `.blockpatch` in the JSON `patch` field without mutating the working tree. A typical flow is: propose a move as JSON, let `blockpatch` validate and render the exact patch, show that patch to the user, then apply the `.blockpatch` in a second explicit step.
 
 ## Move JSON
 
@@ -129,20 +139,22 @@ type ApplyResult = {
   changed: string[]
   affected: string[]
   noop: boolean
+  status: "applied" | "noop" | "already_applied"
+  patch?: string
   moves: Array<{
     id: string
     src: string
     dst: string
     payload_sha256: string
     payload_bytes: number
-    source_range: { start: number; end: number }
+    source_range: { start: number; end: number } | null
     target_range: { start: number; end: number }
     insert_index: number
   }>
 }
 ```
 
-`changed` lists paths whose content changed, or would change during `check` and `--dry-run`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
+`changed` lists paths whose content changed, or would change during `check` and `--dry-run`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the source block is already absent and the exact target-before + payload + target-after bytes are present once. `patch` is present when `move --diff --json-output` is used. In `already_applied` results, `source_range` is `null` because the source block is no longer present. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
 
 Errors print:
 
@@ -154,6 +166,8 @@ type BlockPatchJsonError = {
     message: string
     field?: string
     path?: string
+    phase?: string
+    anchor?: string
     matches?: number
   }
 }
@@ -277,6 +291,10 @@ For one patch:
 10. Remove the original source payload bytes.
 11. Insert those exact original bytes at the target context boundary.
 12. Write changed files with temp-file-and-rename replacement.
+
+If the source full match is absent, `blockpatch` checks for an exact already-applied state before failing: `target context before + payload + target context after` must be present exactly once in the destination file. This is strict idempotence for retries; it does not search fuzzily or infer moved bytes.
+
+With `-R`/`--reverse`, `blockpatch` applies the same exact model in the opposite direction: it locates `target context before + payload + target context after`, removes the verified payload from there, then inserts it between `source context before` and `source context after`. Reverse application is exact and non-fuzzy. A payload-only source hunk has no source-side anchor for reverse insertion, so reverse requires source context before or after.
 
 Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files and stage all changed temp files before renaming any original. If staging fails, originals are left untouched. Once renames begin, the two-file operation is still not transactional; the destination is renamed before the source so an interruption can duplicate the payload, but should not delete it from both files.
 

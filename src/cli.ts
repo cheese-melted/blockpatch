@@ -18,6 +18,7 @@ interface CliOptions {
   dryRun: boolean;
   diff: boolean;
   jsonOutput: boolean;
+  reverse: boolean;
   stripComponents: number;
   moveArgs?: MoveBlockArgs;
   moveJsonPath?: string;
@@ -66,10 +67,12 @@ async function runPatchCommand(options: CliOptions): Promise<ApplyResult> {
     return patchPath === "-"
       ? checkPatchBytes(await readStdin(), {
           cwd: options.cwd,
+          reverse: options.reverse,
           stripComponents: options.stripComponents
         })
       : checkPatchFile(patchPath, {
           cwd: options.cwd,
+          reverse: options.reverse,
           stripComponents: options.stripComponents
         });
   }
@@ -78,11 +81,13 @@ async function runPatchCommand(options: CliOptions): Promise<ApplyResult> {
     ? applyPatchBytes(await readStdin(), {
         cwd: options.cwd,
         dryRun: options.dryRun,
+        reverse: options.reverse,
         stripComponents: options.stripComponents
       })
     : applyPatchFile(patchPath, {
         cwd: options.cwd,
         dryRun: options.dryRun,
+        reverse: options.reverse,
         stripComponents: options.stripComponents
       });
 }
@@ -111,8 +116,9 @@ async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
 
 function parseArgs(argv: string[]): CliOptions {
   const args = [...argv];
+  const explain = takeFlag(args, "--explain");
+  const jsonOutput = takeFlag(args, "--json-output") || explain;
   const first = args.shift();
-  const jsonOutput = takeFlag(args, "--json-output");
 
   if (first === undefined || first === "help" || first === "--help" || first === "-h") {
     return base("help", jsonOutput);
@@ -127,19 +133,31 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   if (first === "move") {
-    return parseMoveArgs(args, jsonOutput);
+    return parseMoveArgs(args, jsonOutput, explain);
   }
 
-  return parsePatchArgs(first, args, jsonOutput);
+  return parsePatchArgs(first, args, jsonOutput, explain);
 }
 
-function parsePatchArgs(command: "apply" | "check", args: string[], jsonOutput: boolean): CliOptions {
+function parsePatchArgs(
+  command: "apply" | "check",
+  args: string[],
+  jsonOutput: boolean,
+  explain: boolean
+): CliOptions {
   const options = base(command, jsonOutput);
+  if (explain && command === "apply") {
+    options.dryRun = true;
+  }
 
   while (args.length > 0) {
     const arg = args.shift();
     if (arg === "--dry-run") {
       options.dryRun = true;
+      continue;
+    }
+    if (arg === "--reverse" || arg === "-R") {
+      options.reverse = true;
       continue;
     }
     if (arg === "--cwd" || arg === "--directory" || arg === "-d") {
@@ -180,8 +198,11 @@ function parsePatchArgs(command: "apply" | "check", args: string[], jsonOutput: 
   return options;
 }
 
-function parseMoveArgs(args: string[], jsonOutput: boolean): CliOptions {
+function parseMoveArgs(args: string[], jsonOutput: boolean, explain: boolean): CliOptions {
   const options = base("move", jsonOutput);
+  if (explain) {
+    options.dryRun = true;
+  }
   const moveArgs: Partial<MoveBlockArgs> = {};
   let sawFlagArgs = false;
 
@@ -263,6 +284,7 @@ function base(command: Command, jsonOutput: boolean): CliOptions {
     dryRun: false,
     diff: false,
     jsonOutput,
+    reverse: false,
     stripComponents: 1
   };
 }
@@ -368,9 +390,9 @@ function printHelp(): void {
   console.log(`blockpatch
 
 Usage:
-  blockpatch check [patch.blockpatch|-] [-d <dir>] [-pN] [--json-output]
-  blockpatch apply [patch.blockpatch|-] [-i <patch.blockpatch>] [-d <dir>] [-pN] [--dry-run] [--json-output]
-  blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--json-output]
+  blockpatch check [patch.blockpatch|-] [-d <dir>] [-pN] [-R|--reverse] [--json-output|--explain]
+  blockpatch apply [patch.blockpatch|-] [-i <patch.blockpatch>] [-d <dir>] [-pN] [-R|--reverse] [--dry-run] [--json-output|--explain]
+  blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--json-output|--explain]
   blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --target-before <text> --target-after <text>
   blockpatch version
 `);
@@ -381,7 +403,7 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   (error: unknown) => {
-    const jsonOutput = process.argv.includes("--json-output");
+    const jsonOutput = process.argv.includes("--json-output") || process.argv.includes("--explain");
     if (error instanceof BlockPatchError) {
       writeError(error.code, error.message, jsonOutput, error.details);
       process.exitCode = 1;

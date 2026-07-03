@@ -1,6 +1,8 @@
 export interface BlockPatchErrorDetails {
   field?: string;
   path?: string;
+  phase?: string;
+  anchor?: string;
   matches?: number;
 }
 

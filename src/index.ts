@@ -5,6 +5,7 @@ export { parseBlockPatch } from "./parser";
 export type {
   ApplyOptions,
   ApplyResult,
+  ApplyStatus,
   BlockPatch,
   BlockPatchJsonError,
   ByteRangeResult,
