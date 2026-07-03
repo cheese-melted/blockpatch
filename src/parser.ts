@@ -58,7 +58,8 @@ export function parseBlockPatch(input: Buffer): BlockPatch {
   return {
     type: "move",
     id: header.moveId,
-    path: header.path,
+    src: header.src,
+    dst: header.dst,
     payloadSha256: header.payloadSha256,
     sourceBefore: source.before,
     sourcePayload: source.payload,
@@ -68,7 +69,8 @@ export function parseBlockPatch(input: Buffer): BlockPatch {
 }
 
 function parseHeader(lines: PatchLine[]): {
-  path: string;
+  src: string;
+  dst: string;
   moveId: string;
   payloadSha256: string;
   hunkStart: number;
@@ -98,16 +100,13 @@ function parseHeader(lines: PatchLine[]): {
 
   const oldPath = parseFileHeader(text(lines[3]), "---", "old file");
   const newPath = parseFileHeader(text(lines[4]), "+++", "new file");
-  if (oldPath !== newPath) {
-    fail("parse_error", "BlockPatch v0 requires matching --- and +++ file paths");
-  }
 
   let hunkStart = 5;
   while (hunkStart < lines.length && text(lines[hunkStart]) === "") {
     hunkStart += 1;
   }
 
-  return { path: oldPath, moveId, payloadSha256, hunkStart };
+  return { src: oldPath, dst: newPath, moveId, payloadSha256, hunkStart };
 }
 
 function parseHunks(lines: PatchLine[], start: number): Hunk[] {

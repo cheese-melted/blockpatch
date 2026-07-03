@@ -9,6 +9,7 @@ The core invariant is simple: the source hunk removes exact bytes, the target hu
 ```sh
 npx blockpatch check patch.blockpatch
 npx blockpatch apply patch.blockpatch
+npx blockpatch move --json -
 bunx blockpatch apply patch.blockpatch --dry-run
 npm install -g blockpatch
 ```
@@ -28,9 +29,72 @@ npm run publish:dry
 blockpatch check patch.blockpatch
 blockpatch apply patch.blockpatch
 blockpatch apply patch.blockpatch --dry-run
+blockpatch apply - < patch.blockpatch
+blockpatch move --json -
+blockpatch move --json move.json
+blockpatch move --src src/foo.ts --src-start 'function movedThing() {' --src-end $'\n}\n' --dst-after 'class Target {'
 ```
 
 `check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing.
+
+`move` is the plug-and-play agent interface. JSON over stdin is the most reliable form because it avoids shell quoting problems:
+
+```sh
+blockpatch move --json - <<'JSON'
+{
+  "src": "src/foo.ts",
+  "src_start": "export function movedThing(",
+  "src_end": "\n}\n",
+  "dst": "src/bar.ts",
+  "dst_after": "export class Target {",
+  "insert": "after"
+}
+JSON
+```
+
+The same shape can be loaded from a file:
+
+```sh
+blockpatch move --json move.blockpatch.json
+```
+
+Human-friendly flags are also supported:
+
+```sh
+blockpatch move \
+  --src src/foo.ts \
+  --src-start 'export function movedThing(' \
+  --src-end $'\n}\n' \
+  --dst src/bar.ts \
+  --dst-after 'export class Target {'
+```
+
+Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document, and `--json-output` for machine-readable success or error output.
+
+## Move JSON
+
+```ts
+type MoveBlockArgs = {
+  src: string
+  src_start: string
+  src_end: string
+  dst?: string
+  dst_before?: string
+  dst_after?: string
+  insert?: "before" | "after"
+  dry_run?: boolean
+}
+```
+
+Rules:
+
+- `src_start` and `src_end` are inclusive source delimiters.
+- `dst` defaults to `src`.
+- exactly one of `dst_before` or `dst_after` is required.
+- source delimiter match must be unique.
+- target anchor match must be unique.
+- moved bytes are extracted from the source file, not regenerated from args.
+- same-file source and target overlap is a hard failure.
 
 ## V0 Format
 
@@ -61,6 +125,8 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
 ```
 
 Line numbers in hunk headers are review hints only. Application uses context and exact payload verification, not line numbers.
+
+The `--- a/<path>` and `+++ b/<path>` headers may name the same file for an intra-file move or different files for a source-to-destination move.
 
 ## Grammar
 
@@ -95,7 +161,7 @@ In that case `blockpatch` inserts immediately before the target context. Otherwi
 
 For one patch:
 
-1. Parse `diff --blockpatch`, metadata, file headers, and paired source/target hunks.
+1. Parse `diff --blockpatch`, metadata, source/destination file headers, and paired source/target hunks.
 2. Verify source and target hunk ids match `blockpatch move id=<id>`.
 3. Extract source payload from contiguous `-` lines.
 4. Extract target payload from contiguous `+` lines.

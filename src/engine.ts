@@ -5,7 +5,7 @@ import { fail } from "./errors";
 import { parseBlockPatch } from "./parser";
 import type { ApplyOptions, ApplyResult, BlockPatch } from "./types";
 
-interface ByteRange {
+export interface ByteRange {
   start: number;
   end: number;
 }
@@ -28,6 +28,13 @@ export async function checkPatchFile(
   return runPatchFile(patchPath, { ...options, dryRun: true });
 }
 
+export async function checkPatchBytes(
+  patchBytes: Buffer,
+  options: ApplyOptions = {}
+): Promise<ApplyResult> {
+  return runPatchBytes(patchBytes, { ...options, dryRun: true });
+}
+
 export async function applyPatchFile(
   patchPath: string,
   options: ApplyOptions = {}
@@ -35,43 +42,71 @@ export async function applyPatchFile(
   return runPatchFile(patchPath, options);
 }
 
+export async function applyPatchBytes(
+  patchBytes: Buffer,
+  options: ApplyOptions = {}
+): Promise<ApplyResult> {
+  return runPatchBytes(patchBytes, options);
+}
+
 async function runPatchFile(patchPath: string, options: ApplyOptions): Promise<ApplyResult> {
   const cwd = options.cwd ?? process.cwd();
   const patchBytes = await readFile(resolve(cwd, patchPath));
-  const patch = parseBlockPatch(patchBytes);
-  const changedPath = await applyMovePatch(patch, cwd, options.dryRun ?? false);
-  return { changed: [changedPath] };
+  return runPatchBytes(patchBytes, options);
 }
 
-async function applyMovePatch(patch: BlockPatch, cwd: string, dryRun: boolean): Promise<string> {
-  const absolutePath = resolve(cwd, patch.path);
-  const original = await readFile(absolutePath);
-  const selection = selectMove(original, patch);
-  const next = applyMove(original, selection);
+async function runPatchBytes(patchBytes: Buffer, options: ApplyOptions): Promise<ApplyResult> {
+  const cwd = options.cwd ?? process.cwd();
+  const patch = parseBlockPatch(patchBytes);
+  const changed = await applyMovePatch(patch, cwd, options.dryRun ?? false);
+  return { changed };
+}
 
-  if (!dryRun && !next.equals(original)) {
-    await writeAtomic(absolutePath, next);
+async function applyMovePatch(patch: BlockPatch, cwd: string, dryRun: boolean): Promise<string[]> {
+  const srcPath = resolve(cwd, patch.src);
+  const dstPath = resolve(cwd, patch.dst);
+  const sameFile = srcPath === dstPath;
+  const srcOriginal = await readFile(srcPath);
+  const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
+  const selection = selectMove(srcOriginal, dstOriginal, patch);
+  const next = sameFile
+    ? applyMove(srcOriginal, selection)
+    : applyCrossFileMove(srcOriginal, dstOriginal, selection);
+
+  if (!dryRun) {
+    if (sameFile) {
+      if (!next.src.equals(srcOriginal)) {
+        await writeAtomic(srcPath, next.src);
+      }
+    } else {
+      if (!next.src.equals(srcOriginal)) {
+        await writeAtomic(srcPath, next.src);
+      }
+      if (!next.dst.equals(dstOriginal)) {
+        await writeAtomic(dstPath, next.dst);
+      }
+    }
   }
 
-  return patch.path;
+  return [...new Set([patch.src, patch.dst])];
 }
 
-export function selectMove(file: Buffer, patch: BlockPatch): MoveSelection {
-  const source = findSourceRange(file, patch);
-  const target = findTarget(file, patch);
+export function selectMove(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): MoveSelection {
+  const source = findSourceRange(srcFile, patch);
+  const target = findTarget(dstFile, patch);
 
-  if (rangesOverlap(source, target.range)) {
-    fail("target_overlaps_source", `Target anchor for ${patch.path} overlaps the source block`);
+  if (patch.src === patch.dst && rangesOverlap(source, target.range)) {
+    fail("target_overlaps_source", `Target anchor for ${patch.dst} overlaps the source block`);
   }
 
   return {
     source,
     target,
-    payload: Buffer.from(file.subarray(source.start, source.end))
+    payload: Buffer.from(srcFile.subarray(source.start, source.end))
   };
 }
 
-export function applyMove(file: Buffer, selection: MoveSelection): Buffer {
+export function applyMove(file: Buffer, selection: MoveSelection): { src: Buffer; dst: Buffer } {
   const withoutSource = Buffer.concat([
     file.subarray(0, selection.source.start),
     file.subarray(selection.source.end)
@@ -81,11 +116,27 @@ export function applyMove(file: Buffer, selection: MoveSelection): Buffer {
       ? selection.target.insertIndex - selection.payload.length
       : selection.target.insertIndex;
 
-  return Buffer.concat([
+  const next = Buffer.concat([
     withoutSource.subarray(0, targetIndex),
     selection.payload,
     withoutSource.subarray(targetIndex)
   ]);
+  return { src: next, dst: next };
+}
+
+function applyCrossFileMove(
+  srcFile: Buffer,
+  dstFile: Buffer,
+  selection: MoveSelection
+): { src: Buffer; dst: Buffer } {
+  return {
+    src: Buffer.concat([srcFile.subarray(0, selection.source.start), srcFile.subarray(selection.source.end)]),
+    dst: Buffer.concat([
+      dstFile.subarray(0, selection.target.insertIndex),
+      selection.payload,
+      dstFile.subarray(selection.target.insertIndex)
+    ])
+  };
 }
 
 function findSourceRange(file: Buffer, patch: BlockPatch): ByteRange {
@@ -98,19 +149,19 @@ function findSourceRange(file: Buffer, patch: BlockPatch): ByteRange {
   }
 
   if (fullMatches.length > 1) {
-    fail("source_ambiguous", `Source block is ambiguous in ${patch.path}; matched ${fullMatches.length} locations`);
+    fail("source_ambiguous", `Source block is ambiguous in ${patch.src}; matched ${fullMatches.length} locations`);
   }
 
   const envelopes = findSourceEnvelopes(file, patch);
   if (envelopes.length === 1) {
-    fail("payload_mismatch", `Source payload does not match located source anchors in ${patch.path}`);
+    fail("payload_mismatch", `Source payload does not match located source anchors in ${patch.src}`);
   }
 
   if (envelopes.length > 1) {
-    fail("source_ambiguous", `Source anchors are ambiguous in ${patch.path}; matched ${envelopes.length} locations`);
+    fail("source_ambiguous", `Source anchors are ambiguous in ${patch.src}; matched ${envelopes.length} locations`);
   }
 
-  fail("source_not_found", `Source anchors were not found in ${patch.path}`);
+  fail("source_not_found", `Source anchors were not found in ${patch.src}`);
 }
 
 function findSourceEnvelopes(file: Buffer, patch: BlockPatch): ByteRange[] {
@@ -133,11 +184,11 @@ function findTarget(file: Buffer, patch: BlockPatch): TargetSelection {
   const matches = indexesOf(file, patch.target.anchor);
 
   if (matches.length === 0) {
-    fail("target_not_found", `Target anchor was not found in ${patch.path}`);
+    fail("target_not_found", `Target anchor was not found in ${patch.dst}`);
   }
 
   if (matches.length > 1) {
-    fail("target_ambiguous", `Target anchor is ambiguous in ${patch.path}; matched ${matches.length} locations`);
+    fail("target_ambiguous", `Target anchor is ambiguous in ${patch.dst}; matched ${matches.length} locations`);
   }
 
   const start = matches[0];
@@ -148,7 +199,7 @@ function findTarget(file: Buffer, patch: BlockPatch): TargetSelection {
   };
 }
 
-function indexesOf(haystack: Buffer, needle: Buffer): number[] {
+export function indexesOf(haystack: Buffer, needle: Buffer): number[] {
   if (needle.length === 0) {
     return [];
   }
@@ -163,11 +214,11 @@ function indexesOf(haystack: Buffer, needle: Buffer): number[] {
   return indexes;
 }
 
-function rangesOverlap(left: ByteRange, right: ByteRange): boolean {
+export function rangesOverlap(left: ByteRange, right: ByteRange): boolean {
   return left.start < right.end && right.start < left.end;
 }
 
-async function writeAtomic(path: string, bytes: Buffer): Promise<void> {
+export async function writeAtomic(path: string, bytes: Buffer): Promise<void> {
   const info = await stat(path);
   const dir = dirname(path);
   const base = basename(path);

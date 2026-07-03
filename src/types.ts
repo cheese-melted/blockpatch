@@ -3,7 +3,8 @@ export type TargetKind = "before" | "after";
 export interface BlockPatch {
   type: "move";
   id: string;
-  path: string;
+  src: string;
+  dst: string;
   payloadSha256: string;
   sourceBefore: Buffer;
   sourcePayload: Buffer;
@@ -23,4 +24,26 @@ export interface ApplyOptions {
 
 export interface ApplyResult {
   changed: string[];
+}
+
+export interface MoveBlockArgs {
+  src: string;
+  src_start: string;
+  src_end: string;
+  dst?: string;
+  dst_before?: string;
+  dst_after?: string;
+  insert?: TargetKind;
+  dry_run?: boolean;
+}
+
+export interface MoveBlockOptions {
+  cwd?: string;
+  dryRun?: boolean;
+  diff?: boolean;
+}
+
+export interface MoveBlockResult {
+  changed: string[];
+  patch?: string;
 }

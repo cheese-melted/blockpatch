@@ -1,6 +1,6 @@
 {
   "name": "blockpatch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Anchored text block relocation patches",
   "type": "module",
   "license": "MIT",
