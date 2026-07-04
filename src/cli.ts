@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { BlockPatchError } from "./errors";
 import { applyPatchBytes, applyPatchFile, checkPatchBytes, checkPatchFile } from "./engine";
+import { readFileChecked } from "./files";
 import { moveBlock } from "./move";
 import type { BlockPatchErrorCode } from "./errors";
 import type { ApplyResult, MoveBlockArgs, MoveBlockResult } from "./types";
@@ -105,7 +105,7 @@ async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
   const jsonBytes =
     options.moveJsonPath === "-"
       ? await readStdin()
-      : await readFile(resolve(options.cwd, options.moveJsonPath));
+      : await readFileChecked(resolve(options.cwd, options.moveJsonPath), "move JSON file");
 
   try {
     return JSON.parse(jsonBytes.toString("utf8")) as MoveBlockArgs;
@@ -273,6 +273,8 @@ function argToMoveKey(arg: string | undefined): keyof MoveBlockArgs | undefined 
       return "target_before";
     case "--target-after":
       return "target_after";
+    case "--expected-payload-sha256":
+      return "expected_payload_sha256";
     default:
       return undefined;
   }
@@ -394,7 +396,7 @@ Usage:
   blockpatch check [patch.blockpatch|-] [-d <dir>] [-pN] [-R|--reverse] [--json-output|--explain]
   blockpatch apply [patch.blockpatch|-] [-i <patch.blockpatch>] [-d <dir>] [-pN] [-R|--reverse] [--dry-run] [--json-output|--explain]
   blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--json-output|--explain]
-  blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --target-before <text> --target-after <text>
+  blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --target-before <text> --target-after <text> [--expected-payload-sha256 <sha256>]
   blockpatch version
 `);
 }

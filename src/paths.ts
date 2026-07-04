@@ -1,7 +1,6 @@
-import { lstatSync, realpathSync } from "node:fs";
-import { stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fail } from "./errors";
+import { assertRegularFile, lstatSyncChecked, realpathSyncChecked, statChecked } from "./files";
 
 export function resolvePath(cwd: string, path: string, label: string): string {
   if (path === "" || path.includes("\0")) {
@@ -16,7 +15,7 @@ export function resolvePath(cwd: string, path: string, label: string): string {
 
   const root = resolve(cwd);
   const resolved = resolve(root, path);
-  const realRoot = realpathSync(root);
+  const realRoot = realpathSyncChecked(root, "working directory", root);
 
   if (!isInside(root, resolved)) {
     fail("path_outside_cwd", `${label} escapes the working directory: ${path}`, { path, phase: "path" });
@@ -24,7 +23,10 @@ export function resolvePath(cwd: string, path: string, label: string): string {
 
   rejectSymlinkComponents(root, resolved, path, label);
 
-  const realResolved = realpathSync(resolved);
+  const info = lstatSyncChecked(resolved, label, path);
+  assertRegularFile(info, path, label, "path");
+
+  const realResolved = realpathSyncChecked(resolved, label, path);
   if (!isInside(realRoot, realResolved)) {
     fail("path_outside_cwd", `${label} resolves outside the working directory: ${path}`, { path, phase: "path" });
   }
@@ -37,7 +39,10 @@ export async function sameFileIdentity(left: string, right: string): Promise<boo
     return true;
   }
 
-  const [leftInfo, rightInfo] = await Promise.all([stat(left), stat(right)]);
+  const [leftInfo, rightInfo] = await Promise.all([
+    statChecked(left, "source path"),
+    statChecked(right, "destination path")
+  ]);
   return leftInfo.dev === rightInfo.dev && leftInfo.ino === rightInfo.ino;
 }
 
@@ -50,7 +55,7 @@ function rejectSymlinkComponents(root: string, resolved: string, originalPath: s
   let current = root;
   for (const part of relativePath.split(sep)) {
     current = join(current, part);
-    if (lstatSync(current).isSymbolicLink()) {
+    if (lstatSyncChecked(current, label, originalPath).isSymbolicLink()) {
       fail("symlink_path", `${label} must not contain symbolic links: ${originalPath}`, {
         path: originalPath,
         phase: "path"

@@ -1,8 +1,9 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import { chmod, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { boundedMatchRanges, boundedRanges, fail } from "./errors";
+import { assertRegularFile, failFileSystem, readFileChecked, statChecked } from "./files";
 import { parseBlockPatch } from "./parser";
 import { resolvePath, sameFileIdentity } from "./paths";
 import type { ApplyOptions, ApplyResult, BlockPatch, MoveResultDetails } from "./types";
@@ -87,7 +88,7 @@ export async function applyPatchBytes(
 
 async function runPatchFile(patchPath: string, options: ApplyOptions): Promise<ApplyResult> {
   const cwd = resolve(options.cwd ?? process.cwd());
-  const patchBytes = await readFile(resolve(cwd, patchPath));
+  const patchBytes = await readFileChecked(resolve(cwd, patchPath), "patch file");
   return runPatchBytes(patchBytes, { ...options, cwd });
 }
 
@@ -107,8 +108,8 @@ async function applyMovePatch(
   const srcPath = resolvePath(cwd, effectivePatch.src, "source path");
   const dstPath = resolvePath(cwd, effectivePatch.dst, "destination path");
   const sameFile = await sameFileIdentity(srcPath, dstPath);
-  const srcOriginal = await readFile(srcPath);
-  const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
+  const srcOriginal = await readFileChecked(srcPath, "source file");
+  const dstOriginal = sameFile ? srcOriginal : await readFileChecked(dstPath, "destination file");
   const plan = selectMovePlan(srcOriginal, dstOriginal, effectivePatch, sameFile);
 
   if (plan.status === "already_applied") {
@@ -524,7 +525,11 @@ async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
       staged.push(await stageAtomicWrite(write.path, write.bytes));
     }
     for (const write of staged) {
-      await rename(write.temp, write.path);
+      try {
+        await rename(write.temp, write.path);
+      } catch (error) {
+        failFileSystem(error, write.path, "Could not replace file");
+      }
     }
   } catch (error) {
     await Promise.all(staged.map((write) => unlink(write.temp).catch(() => undefined)));
@@ -533,7 +538,8 @@ async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
 }
 
 async function stageAtomicWrite(path: string, bytes: Buffer): Promise<StagedAtomicWrite> {
-  const info = await stat(path);
+  const info = await statChecked(path, "output file");
+  assertRegularFile(info, path, "output file");
   const dir = dirname(path);
   const base = basename(path);
   const temp = join(dir, `.${base}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
@@ -543,7 +549,7 @@ async function stageAtomicWrite(path: string, bytes: Buffer): Promise<StagedAtom
     await chmod(temp, info.mode);
   } catch (error) {
     await unlink(temp).catch(() => undefined);
-    throw error;
+    failFileSystem(error, path, "Could not stage file replacement");
   }
 
   return { path, temp };

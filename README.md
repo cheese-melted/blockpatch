@@ -88,7 +88,8 @@ blockpatch move \
   --src-end $'\n}\n' \
   --dst src/bar.ts \
   --target-before $'export class Target {\n' \
-  --target-after $'}\n'
+  --target-after $'}\n' \
+  --expected-payload-sha256 <sha256>
 ```
 
 Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output. `--explain` is a dry-run JSON alias for `--dry-run --json-output`; it reuses the existing `moves` byte ranges and payload hash fields instead of introducing a separate planner.
@@ -125,7 +126,7 @@ Rules:
 - if only `target_before` is supplied, insertion is immediately after that context.
 - if only `target_after` is supplied, insertion is immediately before that context.
 - either target side may be empty when both are supplied, but not both may be empty.
-- `expected_payload_sha256` is optional; when supplied, the selected source bytes must hash to that value before any write happens.
+- `expected_payload_sha256` is optional; in flag mode, pass `--expected-payload-sha256`; when supplied, the selected source bytes must hash to that value before any write happens.
 - source delimiter match must be unique.
 - target anchor match must be unique.
 - moved bytes are extracted from the source file, not regenerated from args.
@@ -187,12 +188,17 @@ type BlockPatchErrorCode =
   | "invalid_path"
   | "path_outside_cwd"
   | "symlink_path"
+  | "file_not_found"
+  | "not_regular_file"
+  | "permission_denied"
+  | "io_error"
   | "source_not_found"
   | "source_ambiguous"
   | "target_not_found"
   | "target_ambiguous"
   | "payload_mismatch"
   | "hash_mismatch"
+  | "invalid_utf8"
   | "target_overlaps_source"
   | "already_applied"
   | "invalid_move_args"
@@ -295,6 +301,8 @@ blockpatch move id=<id> role=target payload-sha256=<sha256>
 
 Source context before and after are exact byte anchors. Either side may be empty, and payload-only source hunks are allowed if the payload is unique.
 
+`blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
+
 The `-<old-start>,<old-count> +<new-start>,<new-count>` ranges are line-number hints for review, not match authority. `blockpatch` validates the line counts against the hunk body, but it locates changes by exact context and payload bytes.
 
 The target hunk must include context on at least one side. `blockpatch` matches `target context before + target context after` exactly once in the destination file and inserts at `start + target context before.length`.
@@ -339,11 +347,13 @@ Same-file moves are atomic at file-replacement granularity. Cross-file moves pre
 
 - the patch file is malformed
 - a patch-declared or move-declared source/destination path is absolute, invalid, or escapes `--cwd`
+- a referenced file is missing, not a regular file, unreadable, unwritable, or otherwise hits a filesystem error
 - source anchors are missing
 - source anchors or full source are ambiguous
 - the located source payload does not exactly match the source hunk payload
 - target added payload does not exactly match source removed payload
 - `payload-sha256` does not match the moved payload
+- `move --diff` would need to render invalid UTF-8 bytes
 - the target anchor is missing
 - the target anchor is ambiguous
 - the target anchor overlaps the source payload

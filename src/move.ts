@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { posix } from "node:path";
+import { TextDecoder } from "node:util";
 import { boundedRanges, fail } from "./errors";
+import { readFileChecked } from "./files";
 import {
   buildMoveSelection,
   commitMove,
@@ -34,6 +35,7 @@ const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   expected_payload_sha256: "string",
   dry_run: "boolean"
 };
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export async function moveBlock(
   args: MoveBlockArgs,
@@ -46,8 +48,8 @@ export async function moveBlock(
   const srcPath = resolvePath(cwd, normalized.src, "source path");
   const dstPath = resolvePath(cwd, normalized.dst, "destination path");
   const sameFile = await sameFileIdentity(srcPath, dstPath);
-  const srcOriginal = await readFile(srcPath);
-  const dstOriginal = sameFile ? srcOriginal : await readFile(dstPath);
+  const srcOriginal = await readFileChecked(srcPath, "source file");
+  const dstOriginal = sameFile ? srcOriginal : await readFileChecked(dstPath, "destination file");
   const source = findSource(srcOriginal, normalized);
   const target = findTargetSelection(dstOriginal, normalized.targetBefore, normalized.targetAfter, normalized.dst, {
     phase: "target",
@@ -343,7 +345,7 @@ function adjacentLineAfter(file: Buffer, index: number): Buffer {
 }
 
 function renderHunkBytes(bytes: Buffer, prefix: " " | "-" | "+"): string {
-  const text = bytes.toString("utf8");
+  const text = decodeUtf8(bytes);
   if (text.length === 0) {
     return "";
   }
@@ -358,4 +360,15 @@ function renderHunkBytes(bytes: Buffer, prefix: " " | "-" | "+"): string {
       return `${prefix}${line}\n\\ No newline at end of file`;
     })
     .join("\n");
+}
+
+function decodeUtf8(bytes: Buffer): string {
+  try {
+    return utf8Decoder.decode(bytes);
+  } catch {
+    fail("invalid_utf8", "move --diff cannot render invalid UTF-8 bytes", {
+      phase: "render",
+      anchor: "move --diff"
+    });
+  }
 }

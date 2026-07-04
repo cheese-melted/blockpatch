@@ -33,6 +33,7 @@ interface Section {
 
 const noNewlineMarker = "\\ No newline at end of file";
 const movePrefix = "blockpatch move ";
+const allowedMetadataKeys = new Set(["id", "payload-sha256", "role"]);
 const hunkPattern =
   /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@ blockpatch-(source|target) id=([^\s]+)(?: .*)?$/;
 
@@ -428,12 +429,19 @@ function assertContiguous(indexes: number[], message: string): void {
 
 function parseMetadata(input: string): Map<string, string> {
   const metadata = new Map<string, string>();
-  for (const part of input.split(/\s+/)) {
+  for (const part of input.trim().split(/\s+/)) {
     const equals = part.indexOf("=");
-    if (equals === -1) {
+    if (equals <= 0) {
       fail("parse_error", `Invalid blockpatch move metadata field: ${part}`);
     }
-    metadata.set(part.slice(0, equals), part.slice(equals + 1));
+    const key = part.slice(0, equals);
+    if (metadata.has(key)) {
+      fail("parse_error", `Duplicate blockpatch move metadata field: ${key}`);
+    }
+    if (!allowedMetadataKeys.has(key) && !key.startsWith("x-")) {
+      fail("parse_error", `Unknown blockpatch move metadata field: ${key}`);
+    }
+    metadata.set(key, part.slice(equals + 1));
   }
   return metadata;
 }
