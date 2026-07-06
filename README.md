@@ -4,6 +4,8 @@
 
 The core invariant is simple: the source hunk removes exact bytes, the target hunk adds the same exact bytes, and `blockpatch` moves the original source bytes instead of regenerating them.
 
+A move transfers one exact payload between two endpoints. An endpoint is normally a file; either endpoint (not both) may instead be the null endpoint, written `/dev/null` as in unified diffs. A move from `/dev/null` materializes the patch-carried, hash-verified payload into the destination (insertion or file creation). A move to `/dev/null` removes the verified payload from the source (deletion or file removal).
+
 `blockpatch` is intentionally closer to `patch --fuzz=0` than default GNU patch: context must match exactly, and line numbers are review hints rather than relocation authority.
 
 ## Install
@@ -152,13 +154,13 @@ type ApplyResult = {
     payload_sha256: string
     payload_bytes: number
     source_range: { start: number; end: number } | null
-    target_range: { start: number; end: number }
-    insert_index: number
+    target_range: { start: number; end: number } | null
+    insert_index: number | null
   }>
 }
 ```
 
-`changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the source block is already absent and the exact target-before + payload + target-after bytes are present once. `patch` is present when `move --diff --json-output` is used. In `already_applied` results, `source_range` is `null` because the source block is no longer present. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
+`changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the source block is already absent and the exact target-before + payload + target-after bytes are present once. `patch` is present when `move --diff --json-output` is used. In `already_applied` results, `source_range` is `null` because the source block is no longer present. For null endpoint moves, `src` or `dst` is the string `/dev/null`, `source_range` is `null` for insertions, and `target_range` and `insert_index` are `null` for deletions. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
 
 Errors print:
 
@@ -244,6 +246,70 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
 ```
 
 Line numbers in hunk headers are review hints only. Application uses context and exact payload verification, not line numbers.
+
+## Null Endpoints
+
+`/dev/null` is a reserved spelling for the null endpoint. It appears bare, without an `a/` or `b/` prefix, exactly as in git diffs, so it can never collide with a real file named `dev/null` (which would appear as `a/dev/null`). The token is recognized during parsing and is never resolved, opened, or checked against `--cwd`; path validation and `-p` stripping do not apply to it.
+
+A move from `/dev/null` carries the payload in its single target hunk:
+
+```diff
+diff --blockpatch /dev/null b/src/example.ts
+blockpatch version 1
+blockpatch move id=move-1 payload-sha256=<sha256 of the added payload>
+--- /dev/null
++++ b/src/example.ts
+
+@@ -1,2 +1,3 @@ blockpatch-target id=move-1
+ context before
++inserted line
+ context after
+```
+
+A move to `/dev/null` names the doomed payload in its single source hunk:
+
+```diff
+diff --blockpatch a/src/example.ts /dev/null
+blockpatch version 1
+blockpatch move id=move-1 payload-sha256=<sha256 of the removed payload>
+--- a/src/example.ts
++++ /dev/null
+
+@@ -1,3 +1,2 @@ blockpatch-source id=move-1
+ context before
+-doomed line
+ context after
+```
+
+The endpoint shapes and their meaning:
+
+| Shape | Meaning |
+| --- | --- |
+| `file -> file` | normal move / relocation |
+| `/dev/null -> file` | materialize payload: insertion, or file creation |
+| `file -> /dev/null` | remove payload: deletion, or file removal |
+| `/dev/null -> /dev/null` | invalid |
+
+The key distinction is that an empty file is a real endpoint while `/dev/null` is the null endpoint. A missing file is an error unless the patch explicitly says `/dev/null`; missing files never silently resolve as empty files.
+
+Rules for a move from `/dev/null` (insertion):
+
+- the section contains exactly one `blockpatch-target` hunk and no source hunk.
+- the payload comes from the `+` lines and must match `payload-sha256`.
+- with anchors, the destination file must exist and `target context before + target context after` must match exactly once; the payload is inserted at the boundary.
+- anchorless insertion (no context on either side) is only valid when the destination file is missing or empty. A missing destination is created, including parent directories; new files are created with mode 0644.
+- if the anchored payload is already present (`before + payload + after` matches exactly once), or the anchorless destination already equals the payload, the result is `already_applied`.
+
+Rules for a move to `/dev/null` (deletion):
+
+- the section contains exactly one `blockpatch-source` hunk and no target hunk.
+- `source context before + payload + source context after` must match exactly once; the payload bytes are removed.
+- if removal leaves zero bytes, the file itself is removed. Anchored deletions always leave the anchors behind, so only anchorless whole-content deletions remove files.
+- retries are idempotent: an anchored deletion whose anchors are already adjacent exactly once, an anchorless deletion whose payload is absent, or an anchorless whole-file deletion whose file is already missing all report `already_applied`.
+
+`-R`/`--reverse` swaps the endpoints: reversing an insertion deletes the payload, reversing a file creation removes the created file, and reversing a deletion re-inserts the payload between its source anchors (recreating the file for a reversed whole-file deletion).
+
+Null endpoints are only valid in single-section moves; `role=` split sections cannot use them. In JSON output, a null endpoint is rendered as the string `/dev/null` in `src` or `dst`, `source_range` is `null` for insertions, and `target_range` and `insert_index` are `null` for deletions.
 
 Same-file moves use one file section with paired source and target hunks. In that shape, the `--- a/<path>` and `+++ b/<path>` headers must name the same file after normal path cleanup.
 
@@ -346,8 +412,10 @@ Same-file moves are atomic at file-replacement granularity. Cross-file moves pre
 `blockpatch` exits non-zero and does not modify files when:
 
 - the patch file is malformed
+- both endpoints are `/dev/null`
 - a patch-declared or move-declared source/destination path is absolute, invalid, or escapes `--cwd`
-- a referenced file is missing, not a regular file, unreadable, unwritable, or otherwise hits a filesystem error
+- a referenced file is missing (and the patch does not say `/dev/null` where creation or removal would make that legal), not a regular file, unreadable, unwritable, or otherwise hits a filesystem error
+- an anchorless insertion targets an existing non-empty file
 - source anchors are missing
 - source anchors or full source are ambiguous
 - the located source payload does not exactly match the source hunk payload
@@ -384,3 +452,4 @@ The current format does not implement:
 - code formatting
 - copy operations
 - regex anchors
+- null endpoints in `move --json` / `move --diff` (the planner interface is file-to-file; null endpoint moves are written as patch documents)

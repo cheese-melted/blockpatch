@@ -4,8 +4,8 @@ import type { BlockPatchErrorCode } from "./errors";
 export interface BlockPatch {
   type: "move";
   id: string;
-  src: string;
-  dst: string;
+  src: string | null;
+  dst: string | null;
   payloadSha256: string;
   sourceBefore: Buffer;
   sourcePayload: Buffer;
@@ -37,8 +37,8 @@ export interface MoveResultDetails {
   payload_sha256: string;
   payload_bytes: number;
   source_range: ByteRangeResult | null;
-  target_range: ByteRangeResult;
-  insert_index: number;
+  target_range: ByteRangeResult | null;
+  insert_index: number | null;
 }
 
 export type ApplyStatus = "applied" | "noop" | "already_applied";

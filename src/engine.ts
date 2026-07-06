@@ -1,11 +1,11 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import { chmod, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { boundedMatchRanges, boundedRanges, fail } from "./errors";
 import { assertRegularFile, failFileSystem, readFileChecked, statChecked } from "./files";
-import { parseBlockPatch } from "./parser";
-import { resolvePath, sameFileIdentity } from "./paths";
+import { devNull, parseBlockPatch } from "./parser";
+import { resolvePath, resolvePathAllowMissing, sameFileIdentity } from "./paths";
 import type { ApplyOptions, ApplyResult, BlockPatch, MoveResultDetails } from "./types";
 
 export interface ByteRange {
@@ -51,6 +51,7 @@ export interface CommitMoveArgs {
 interface AtomicWriteRequest {
   path: string;
   bytes: Buffer;
+  create?: boolean;
 }
 
 interface StagedAtomicWrite {
@@ -105,8 +106,19 @@ async function applyMovePatch(
   reverse: boolean
 ): Promise<ApplyResult> {
   const effectivePatch = reverse ? reverseMovePatch(patch) : patch;
-  const srcPath = resolvePath(cwd, effectivePatch.src, "source path");
-  const dstPath = resolvePath(cwd, effectivePatch.dst, "destination path");
+  if (effectivePatch.src === null && effectivePatch.dst !== null) {
+    return applyNullSourceMove(effectivePatch, effectivePatch.dst, cwd, dryRun);
+  }
+  if (effectivePatch.dst === null && effectivePatch.src !== null) {
+    return applyNullTargetMove(effectivePatch, effectivePatch.src, cwd, dryRun);
+  }
+  if (effectivePatch.src === null || effectivePatch.dst === null) {
+    fail("parse_error", "Patch cannot use /dev/null for both endpoints");
+  }
+  const srcLabel = effectivePatch.src;
+  const dstLabel = effectivePatch.dst;
+  const srcPath = resolvePath(cwd, srcLabel, "source path");
+  const dstPath = resolvePath(cwd, dstLabel, "destination path");
   const sameFile = await sameFileIdentity(srcPath, dstPath);
   const srcOriginal = await readFileChecked(srcPath, "source file");
   const dstOriginal = sameFile ? srcOriginal : await readFileChecked(dstPath, "destination file");
@@ -115,7 +127,7 @@ async function applyMovePatch(
   if (plan.status === "already_applied") {
     return {
       changed: [],
-      affected: unique([effectivePatch.src, effectivePatch.dst]),
+      affected: unique([srcLabel, dstLabel]),
       written: false,
       noop: true,
       status: "already_applied",
@@ -132,21 +144,21 @@ async function applyMovePatch(
     srcOriginal,
     dstOriginal,
     selection,
-    srcLabel: effectivePatch.src,
-    dstLabel: effectivePatch.dst
+    srcLabel,
+    dstLabel
   });
 
   return {
     changed,
-    affected: unique([effectivePatch.src, effectivePatch.dst]),
+    affected: unique([srcLabel, dstLabel]),
     written: !dryRun && changed.length > 0,
     noop: changed.length === 0,
     status: changed.length === 0 ? "noop" : "applied",
     moves: [
       moveResultDetails({
         id: effectivePatch.id,
-        src: effectivePatch.src,
-        dst: effectivePatch.dst,
+        src: srcLabel,
+        dst: dstLabel,
         payloadSha256: effectivePatch.payloadSha256,
         selection
       })
@@ -168,25 +180,261 @@ function reverseMovePatch(patch: BlockPatch): BlockPatch {
   };
 }
 
+// /dev/null -> file: materialize the patch-carried payload at the target anchor,
+// creating the file when it does not exist and both anchors are empty.
+async function applyNullSourceMove(
+  patch: BlockPatch,
+  dstLabel: string,
+  cwd: string,
+  dryRun: boolean
+): Promise<ApplyResult> {
+  const resolved = resolvePathAllowMissing(cwd, dstLabel, "destination path");
+  const anchorless = patch.target.before.length === 0 && patch.target.after.length === 0;
+
+  if (!resolved.exists) {
+    if (!anchorless) {
+      fail("file_not_found", `Destination file for anchored insertion does not exist: ${dstLabel}`, {
+        path: dstLabel,
+        phase: "target",
+        anchor: "blockpatch-target"
+      });
+    }
+    if (!dryRun) {
+      await writeAtomically([{ path: resolved.path, bytes: patch.sourcePayload, create: true }]);
+    }
+    return nullSourceResult(patch, dstLabel, dryRun, "applied", { start: 0, end: 0 }, 0);
+  }
+
+  const original = await readFileChecked(resolved.path, "destination file");
+
+  if (anchorless) {
+    if (original.equals(patch.sourcePayload)) {
+      return nullSourceResult(patch, dstLabel, dryRun, "already_applied", { start: 0, end: original.length }, 0);
+    }
+    if (original.length !== 0) {
+      fail("target_not_found", `Anchorless insertion requires a missing or empty destination file: ${dstLabel}`, {
+        path: dstLabel,
+        phase: "target",
+        anchor: "blockpatch-target"
+      });
+    }
+    if (!dryRun) {
+      await writeAtomically([{ path: resolved.path, bytes: patch.sourcePayload }]);
+    }
+    return nullSourceResult(patch, dstLabel, dryRun, "applied", { start: 0, end: 0 }, 0);
+  }
+
+  const alreadyApplied = findAlreadyAppliedTargetSelection(original, patch, dstLabel);
+  if (alreadyApplied !== undefined) {
+    return nullSourceResult(
+      patch,
+      dstLabel,
+      dryRun,
+      "already_applied",
+      alreadyApplied.range,
+      alreadyApplied.insertIndex
+    );
+  }
+
+  const target = findTargetSelection(original, patch.target.before, patch.target.after, dstLabel, {
+    phase: "target",
+    anchor: "blockpatch-target"
+  });
+  const next = Buffer.concat([
+    original.subarray(0, target.insertIndex),
+    patch.sourcePayload,
+    original.subarray(target.insertIndex)
+  ]);
+  if (!dryRun) {
+    await writeAtomically([{ path: resolved.path, bytes: next }]);
+  }
+  return nullSourceResult(patch, dstLabel, dryRun, "applied", target.range, target.insertIndex);
+}
+
+// file -> /dev/null: remove the verified payload; removing the last byte removes the file.
+async function applyNullTargetMove(
+  patch: BlockPatch,
+  srcLabel: string,
+  cwd: string,
+  dryRun: boolean
+): Promise<ApplyResult> {
+  const resolved = resolvePathAllowMissing(cwd, srcLabel, "source path");
+  const anchorless = patch.sourceBefore.length === 0 && patch.sourceAfter.length === 0;
+
+  if (!resolved.exists) {
+    if (!anchorless) {
+      fail("file_not_found", `Source file for anchored deletion does not exist: ${srcLabel}`, {
+        path: srcLabel,
+        phase: "source",
+        anchor: "blockpatch-source"
+      });
+    }
+    return nullTargetResult(patch, srcLabel, dryRun, "already_applied", null);
+  }
+
+  const original = await readFileChecked(resolved.path, "source file");
+  const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
+  const fullMatches = indexesOf(original, fullSource);
+
+  if (fullMatches.length > 1) {
+    fail("source_ambiguous", `Source block is ambiguous in ${srcLabel}; matched ${fullMatches.length} locations`, {
+      path: srcLabel,
+      phase: "source",
+      anchor: "blockpatch-source",
+      matches: fullMatches.length,
+      ranges: boundedMatchRanges(fullMatches, fullSource.length)
+    });
+  }
+
+  if (fullMatches.length === 0) {
+    return nullTargetAlreadyApplied(patch, srcLabel, dryRun, original, anchorless);
+  }
+
+  const start = fullMatches[0] + patch.sourceBefore.length;
+  const source = { start, end: start + patch.sourcePayload.length };
+  const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
+
+  if (!dryRun) {
+    if (next.length === 0) {
+      try {
+        await unlink(resolved.path);
+      } catch (error) {
+        failFileSystem(error, srcLabel, "Could not remove file");
+      }
+    } else {
+      await writeAtomically([{ path: resolved.path, bytes: next }]);
+    }
+  }
+  return nullTargetResult(patch, srcLabel, dryRun, "applied", source);
+}
+
+function nullTargetAlreadyApplied(
+  patch: BlockPatch,
+  srcLabel: string,
+  dryRun: boolean,
+  original: Buffer,
+  anchorless: boolean
+): ApplyResult {
+  if (anchorless) {
+    if (indexesOf(original, patch.sourcePayload).length === 0) {
+      return nullTargetResult(patch, srcLabel, dryRun, "already_applied", null);
+    }
+    fail("source_ambiguous", `Source payload is ambiguous in ${srcLabel}`, {
+      path: srcLabel,
+      phase: "source",
+      anchor: "blockpatch-source"
+    });
+  }
+
+  const adjacent = Buffer.concat([patch.sourceBefore, patch.sourceAfter]);
+  if (indexesOf(original, adjacent).length === 1) {
+    return nullTargetResult(patch, srcLabel, dryRun, "already_applied", null);
+  }
+
+  const envelopes = findSourceEnvelopes(original, patch);
+  if (envelopes.length === 1) {
+    fail("payload_mismatch", `Source payload does not match located source anchors in ${srcLabel}`, {
+      path: srcLabel,
+      phase: "payload",
+      anchor: "blockpatch-source"
+    });
+  }
+  if (envelopes.length > 1) {
+    fail("source_ambiguous", `Source anchors are ambiguous in ${srcLabel}; matched ${envelopes.length} locations`, {
+      path: srcLabel,
+      phase: "source",
+      anchor: "blockpatch-source",
+      matches: envelopes.length,
+      ranges: boundedRanges(envelopes)
+    });
+  }
+  fail("source_not_found", `Source anchors were not found in ${srcLabel}`, {
+    path: srcLabel,
+    phase: "source",
+    anchor: "blockpatch-source",
+    matches: 0
+  });
+}
+
+function nullSourceResult(
+  patch: BlockPatch,
+  dstLabel: string,
+  dryRun: boolean,
+  status: "applied" | "already_applied",
+  targetRange: ByteRange,
+  insertIndex: number
+): ApplyResult {
+  const applied = status === "applied";
+  return {
+    changed: applied ? [dstLabel] : [],
+    affected: [dstLabel],
+    written: applied && !dryRun,
+    noop: !applied,
+    status,
+    moves: [
+      {
+        id: patch.id,
+        src: devNull,
+        dst: dstLabel,
+        payload_sha256: patch.payloadSha256,
+        payload_bytes: patch.sourcePayload.length,
+        source_range: null,
+        target_range: targetRange,
+        insert_index: insertIndex
+      }
+    ]
+  };
+}
+
+function nullTargetResult(
+  patch: BlockPatch,
+  srcLabel: string,
+  dryRun: boolean,
+  status: "applied" | "already_applied",
+  sourceRange: ByteRange | null
+): ApplyResult {
+  const applied = status === "applied";
+  return {
+    changed: applied ? [srcLabel] : [],
+    affected: [srcLabel],
+    written: applied && !dryRun,
+    noop: !applied,
+    status,
+    moves: [
+      {
+        id: patch.id,
+        src: srcLabel,
+        dst: devNull,
+        payload_sha256: patch.payloadSha256,
+        payload_bytes: patch.sourcePayload.length,
+        source_range: sourceRange,
+        target_range: null,
+        insert_index: null
+      }
+    ]
+  };
+}
+
 export function selectMove(
   srcFile: Buffer,
   dstFile: Buffer,
   patch: BlockPatch,
   sameFile: boolean
 ): MoveSelection {
+  const dstLabel = patch.dst ?? devNull;
   const source = findSourceRange(srcFile, dstFile, patch);
   if (source === undefined) {
-    fail("already_applied", `Patch is already applied in ${patch.dst}`, {
-      path: patch.dst,
+    fail("already_applied", `Patch is already applied in ${dstLabel}`, {
+      path: dstLabel,
       phase: "target",
       anchor: "blockpatch-target"
     });
   }
-  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, patch.dst, {
+  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, dstLabel, {
     phase: "target",
     anchor: "blockpatch-target"
   });
-  return buildMoveSelection(srcFile, source, target, sameFile, patch.dst);
+  return buildMoveSelection(srcFile, source, target, sameFile, dstLabel);
 }
 
 function selectMovePlan(
@@ -195,12 +443,14 @@ function selectMovePlan(
   patch: BlockPatch,
   sameFile: boolean
 ): MovePlan {
+  const srcLabel = patch.src ?? devNull;
+  const dstLabel = patch.dst ?? devNull;
   const source = findSourceRange(srcFile, dstFile, patch);
   if (source === undefined) {
     const target = findAlreadyAppliedTargetSelection(dstFile, patch);
     if (target === undefined) {
-      fail("source_not_found", `Source anchors were not found in ${patch.src}`, {
-        path: patch.src,
+      fail("source_not_found", `Source anchors were not found in ${srcLabel}`, {
+        path: srcLabel,
         phase: "source",
         anchor: "blockpatch-source",
         matches: 0
@@ -210,8 +460,8 @@ function selectMovePlan(
       status: "already_applied",
       details: alreadyAppliedMoveResultDetails({
         id: patch.id,
-        src: patch.src,
-        dst: patch.dst,
+        src: srcLabel,
+        dst: dstLabel,
         payloadSha256: patch.payloadSha256,
         payload: patch.sourcePayload,
         target
@@ -219,13 +469,13 @@ function selectMovePlan(
     };
   }
 
-  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, patch.dst, {
+  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, dstLabel, {
     phase: "target",
     anchor: "blockpatch-target"
   });
   return {
     status: "pending",
-    selection: buildMoveSelection(srcFile, source, target, sameFile, patch.dst)
+    selection: buildMoveSelection(srcFile, source, target, sameFile, dstLabel)
   };
 }
 
@@ -319,6 +569,7 @@ export function applyCrossFileMove(
 }
 
 function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): ByteRange | undefined {
+  const srcLabel = patch.src ?? devNull;
   const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
   const fullMatches = indexesOf(srcFile, fullSource);
 
@@ -328,8 +579,8 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
   }
 
   if (fullMatches.length > 1) {
-    fail("source_ambiguous", `Source block is ambiguous in ${patch.src}; matched ${fullMatches.length} locations`, {
-      path: patch.src,
+    fail("source_ambiguous", `Source block is ambiguous in ${srcLabel}; matched ${fullMatches.length} locations`, {
+      path: srcLabel,
       phase: "source",
       anchor: "blockpatch-source",
       matches: fullMatches.length,
@@ -344,16 +595,16 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
 
   const envelopes = findSourceEnvelopes(srcFile, patch);
   if (envelopes.length === 1) {
-    fail("payload_mismatch", `Source payload does not match located source anchors in ${patch.src}`, {
-      path: patch.src,
+    fail("payload_mismatch", `Source payload does not match located source anchors in ${srcLabel}`, {
+      path: srcLabel,
       phase: "payload",
       anchor: "blockpatch-source"
     });
   }
 
   if (envelopes.length > 1) {
-    fail("source_ambiguous", `Source anchors are ambiguous in ${patch.src}; matched ${envelopes.length} locations`, {
-      path: patch.src,
+    fail("source_ambiguous", `Source anchors are ambiguous in ${srcLabel}; matched ${envelopes.length} locations`, {
+      path: srcLabel,
       phase: "source",
       anchor: "blockpatch-source",
       matches: envelopes.length,
@@ -361,8 +612,8 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
     });
   }
 
-  fail("source_not_found", `Source anchors were not found in ${patch.src}`, {
-    path: patch.src,
+  fail("source_not_found", `Source anchors were not found in ${srcLabel}`, {
+    path: srcLabel,
     phase: "source",
     anchor: "blockpatch-source",
     matches: 0
@@ -371,7 +622,8 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
 
 function findAlreadyAppliedTargetSelection(
   file: Buffer,
-  patch: BlockPatch
+  patch: BlockPatch,
+  dstLabel: string = patch.dst ?? devNull
 ): TargetSelection | undefined {
   const alreadyApplied = Buffer.concat([patch.target.before, patch.sourcePayload, patch.target.after]);
   const matches = indexesOf(file, alreadyApplied);
@@ -383,9 +635,9 @@ function findAlreadyAppliedTargetSelection(
   if (matches.length > 1) {
     fail(
       "target_ambiguous",
-      `Already-applied target is ambiguous in ${patch.dst}; matched ${matches.length} locations`,
+      `Already-applied target is ambiguous in ${dstLabel}; matched ${matches.length} locations`,
       {
-        path: patch.dst,
+        path: dstLabel,
         phase: "target",
         anchor: "blockpatch-target",
         matches: matches.length,
@@ -522,7 +774,7 @@ async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
 
   try {
     for (const write of writes) {
-      staged.push(await stageAtomicWrite(write.path, write.bytes));
+      staged.push(await stageAtomicWrite(write.path, write.bytes, write.create === true));
     }
     for (const write of staged) {
       try {
@@ -537,20 +789,48 @@ async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
   }
 }
 
-async function stageAtomicWrite(path: string, bytes: Buffer): Promise<StagedAtomicWrite> {
-  const info = await statChecked(path, "output file");
-  assertRegularFile(info, path, "output file");
+async function stageAtomicWrite(path: string, bytes: Buffer, create = false): Promise<StagedAtomicWrite> {
+  let mode: number | undefined;
+  if (create) {
+    const info = await statOptional(path);
+    if (info !== undefined) {
+      assertRegularFile(info, path, "output file");
+      mode = info.mode;
+    }
+  } else {
+    const info = await statChecked(path, "output file");
+    assertRegularFile(info, path, "output file");
+    mode = info.mode;
+  }
+
   const dir = dirname(path);
   const base = basename(path);
   const temp = join(dir, `.${base}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
 
   try {
+    if (create && mode === undefined) {
+      await mkdir(dir, { recursive: true });
+    }
     await writeFile(temp, bytes, { flag: "wx" });
-    await chmod(temp, info.mode);
+    if (mode !== undefined) {
+      await chmod(temp, mode);
+    }
   } catch (error) {
     await unlink(temp).catch(() => undefined);
     failFileSystem(error, path, "Could not stage file replacement");
   }
 
   return { path, temp };
+}
+
+async function statOptional(path: string) {
+  try {
+    return await stat(path);
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return undefined;
+    }
+    failFileSystem(error, path, "Could not stat output file");
+  }
 }
