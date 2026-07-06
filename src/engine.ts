@@ -106,15 +106,24 @@ async function applyMovePatch(
   reverse: boolean
 ): Promise<ApplyResult> {
   const effectivePatch = reverse ? reverseMovePatch(patch) : patch;
-  if (effectivePatch.src === null && effectivePatch.dst !== null) {
-    return applyNullSourceMove(effectivePatch, effectivePatch.dst, cwd, dryRun);
-  }
-  if (effectivePatch.dst === null && effectivePatch.src !== null) {
-    return applyNullTargetMove(effectivePatch, effectivePatch.src, cwd, dryRun);
-  }
   if (effectivePatch.src === null || effectivePatch.dst === null) {
-    fail("parse_error", "Patch cannot use /dev/null for both endpoints");
+    if (effectivePatch.src === null && effectivePatch.dst !== null && !effectivePatch.hasSourceHunk) {
+      return applyPathCreationMove(effectivePatch, effectivePatch.dst, cwd, dryRun);
+    }
+    if (effectivePatch.dst === null && effectivePatch.src !== null && effectivePatch.hasSourceHunk) {
+      return applyPathDeletionMove(effectivePatch, effectivePatch.src, cwd, dryRun);
+    }
+    fail("parse_error", "Invalid /dev/null endpoint move shape");
   }
+
+  if (!effectivePatch.hasSourceHunk) {
+    return applyInFileInsertionMove(effectivePatch, effectivePatch.src, effectivePatch.dst, cwd, dryRun);
+  }
+
+  if (effectivePatch.target === null) {
+    return applyInFileDeletionMove(effectivePatch, effectivePatch.src, effectivePatch.dst, cwd, dryRun);
+  }
+
   const srcLabel = effectivePatch.src;
   const dstLabel = effectivePatch.dst;
   const srcPath = resolvePath(cwd, srcLabel, "source path");
@@ -167,114 +176,237 @@ async function applyMovePatch(
 }
 
 function reverseMovePatch(patch: BlockPatch): BlockPatch {
+  const reversedTarget = patch.hasSourceHunk
+    ? {
+        before: patch.sourceBefore,
+        after: patch.sourceAfter
+      }
+    : null;
+
   return {
     ...patch,
     src: patch.dst,
     dst: patch.src,
-    sourceBefore: patch.target.before,
-    sourceAfter: patch.target.after,
-    target: {
-      before: patch.sourceBefore,
-      after: patch.sourceAfter
-    }
+    hasSourceHunk: patch.target !== null,
+    sourceBefore: patch.target?.before ?? Buffer.alloc(0),
+    sourcePayload: patch.sourcePayload,
+    sourceAfter: patch.target?.after ?? Buffer.alloc(0),
+    target: reversedTarget
   };
 }
 
-// /dev/null -> file: materialize the patch-carried payload at the target anchor,
-// creating the file when it does not exist and both anchors are empty.
-async function applyNullSourceMove(
+async function applyInFileInsertionMove(
+  patch: BlockPatch,
+  srcLabel: string,
+  dstLabel: string,
+  cwd: string,
+  dryRun: boolean
+): Promise<ApplyResult> {
+  const target = requireTarget(patch);
+  const dstPath = resolvePath(cwd, dstLabel, "destination path");
+  const original = await readFileChecked(dstPath, "destination file");
+  const alreadyApplied = findAlreadyAppliedTargetSelection(original, patch, dstLabel);
+  if (alreadyApplied !== undefined) {
+    return oneSidedResult({
+      patch,
+      src: srcLabel,
+      dst: dstLabel,
+      changed: [],
+      dryRun,
+      status: "already_applied",
+      sourceRange: null,
+      targetRange: alreadyApplied.range,
+      insertIndex: alreadyApplied.insertIndex
+    });
+  }
+
+  const selection = findTargetSelection(original, target.before, target.after, dstLabel, {
+    phase: "target",
+    anchor: "blockpatch-target"
+  });
+  const next = Buffer.concat([
+    original.subarray(0, selection.insertIndex),
+    patch.sourcePayload,
+    original.subarray(selection.insertIndex)
+  ]);
+
+  if (!dryRun) {
+    await writeAtomically([{ path: dstPath, bytes: next }]);
+  }
+
+  return oneSidedResult({
+    patch,
+    src: srcLabel,
+    dst: dstLabel,
+    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
+    dryRun,
+    status: next.equals(original) ? "noop" : "applied",
+    sourceRange: null,
+    targetRange: selection.range,
+    insertIndex: selection.insertIndex
+  });
+}
+
+async function applyInFileDeletionMove(
+  patch: BlockPatch,
+  srcLabel: string,
+  dstLabel: string,
+  cwd: string,
+  dryRun: boolean
+): Promise<ApplyResult> {
+  const srcPath = resolvePath(cwd, srcLabel, "source path");
+  const original = await readFileChecked(srcPath, "source file");
+  const source = findDeletionSourceRange(original, patch, srcLabel);
+
+  if (source === undefined) {
+    return oneSidedResult({
+      patch,
+      src: srcLabel,
+      dst: dstLabel,
+      changed: [],
+      dryRun,
+      status: "already_applied",
+      sourceRange: null,
+      targetRange: null,
+      insertIndex: null
+    });
+  }
+
+  const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
+  if (!dryRun) {
+    await writeAtomically([{ path: srcPath, bytes: next }]);
+  }
+
+  return oneSidedResult({
+    patch,
+    src: srcLabel,
+    dst: dstLabel,
+    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
+    dryRun,
+    status: next.equals(original) ? "noop" : "applied",
+    sourceRange: source,
+    targetRange: null,
+    insertIndex: null
+  });
+}
+
+function oneSidedResult(args: {
+  patch: BlockPatch;
+  src: string;
+  dst: string;
+  changed: string[];
+  dryRun: boolean;
+  status: "applied" | "noop" | "already_applied";
+  sourceRange: ByteRange | null;
+  targetRange: ByteRange | null;
+  insertIndex: number | null;
+}): ApplyResult {
+  return {
+    changed: args.changed,
+    affected: unique([args.src, args.dst]),
+    written: args.status === "applied" && !args.dryRun && args.changed.length > 0,
+    noop: args.status !== "applied" || args.changed.length === 0,
+    status: args.status,
+    moves: [
+      {
+        id: args.patch.id,
+        src: args.src,
+        dst: args.dst,
+        payload_sha256: args.patch.payloadSha256,
+        payload_bytes: args.patch.sourcePayload.length,
+        source_range: args.sourceRange,
+        target_range: args.targetRange,
+        insert_index: args.insertIndex
+      }
+    ]
+  };
+}
+
+// /dev/null -> file: create the file path with the patch-carried whole-file payload.
+async function applyPathCreationMove(
   patch: BlockPatch,
   dstLabel: string,
   cwd: string,
   dryRun: boolean
 ): Promise<ApplyResult> {
   const resolved = resolvePathAllowMissing(cwd, dstLabel, "destination path");
-  const anchorless = patch.target.before.length === 0 && patch.target.after.length === 0;
+  const fullTarget = fullTargetBytes(patch);
 
-  if (!resolved.exists) {
-    if (!anchorless) {
-      fail("file_not_found", `Destination file for anchored insertion does not exist: ${dstLabel}`, {
-        path: dstLabel,
-        phase: "target",
-        anchor: "blockpatch-target"
-      });
-    }
-    if (!dryRun) {
-      await writeAtomically([{ path: resolved.path, bytes: patch.sourcePayload, create: true }]);
-    }
-    return nullSourceResult(patch, dstLabel, dryRun, "applied", { start: 0, end: 0 }, 0);
-  }
-
-  const original = await readFileChecked(resolved.path, "destination file");
-
-  if (anchorless) {
-    if (original.equals(patch.sourcePayload)) {
+  if (resolved.exists) {
+    const original = await readFileChecked(resolved.path, "destination file");
+    if (original.equals(fullTarget)) {
       return nullSourceResult(patch, dstLabel, dryRun, "already_applied", { start: 0, end: original.length }, 0);
     }
-    if (original.length !== 0) {
-      fail("target_not_found", `Anchorless insertion requires a missing or empty destination file: ${dstLabel}`, {
-        path: dstLabel,
-        phase: "target",
-        anchor: "blockpatch-target"
-      });
-    }
-    if (!dryRun) {
-      await writeAtomically([{ path: resolved.path, bytes: patch.sourcePayload }]);
-    }
-    return nullSourceResult(patch, dstLabel, dryRun, "applied", { start: 0, end: 0 }, 0);
+    fail("target_not_found", `Destination path for file creation already exists: ${dstLabel}`, {
+      path: dstLabel,
+      phase: "target",
+      anchor: "blockpatch-target"
+    });
   }
 
-  const alreadyApplied = findAlreadyAppliedTargetSelection(original, patch, dstLabel);
-  if (alreadyApplied !== undefined) {
-    return nullSourceResult(
-      patch,
-      dstLabel,
-      dryRun,
-      "already_applied",
-      alreadyApplied.range,
-      alreadyApplied.insertIndex
-    );
-  }
-
-  const target = findTargetSelection(original, patch.target.before, patch.target.after, dstLabel, {
-    phase: "target",
-    anchor: "blockpatch-target"
-  });
-  const next = Buffer.concat([
-    original.subarray(0, target.insertIndex),
-    patch.sourcePayload,
-    original.subarray(target.insertIndex)
-  ]);
   if (!dryRun) {
-    await writeAtomically([{ path: resolved.path, bytes: next }]);
+    await writeAtomically([{ path: resolved.path, bytes: fullTarget, create: true }]);
   }
-  return nullSourceResult(patch, dstLabel, dryRun, "applied", target.range, target.insertIndex);
+  return nullSourceResult(patch, dstLabel, dryRun, "applied", { start: 0, end: 0 }, 0);
 }
 
-// file -> /dev/null: remove the verified payload; removing the last byte removes the file.
-async function applyNullTargetMove(
+// file -> /dev/null: verify the whole-file payload, then remove the path.
+async function applyPathDeletionMove(
   patch: BlockPatch,
   srcLabel: string,
   cwd: string,
   dryRun: boolean
 ): Promise<ApplyResult> {
   const resolved = resolvePathAllowMissing(cwd, srcLabel, "source path");
-  const anchorless = patch.sourceBefore.length === 0 && patch.sourceAfter.length === 0;
-
   if (!resolved.exists) {
-    if (!anchorless) {
-      fail("file_not_found", `Source file for anchored deletion does not exist: ${srcLabel}`, {
-        path: srcLabel,
-        phase: "source",
-        anchor: "blockpatch-source"
-      });
-    }
     return nullTargetResult(patch, srcLabel, dryRun, "already_applied", null);
   }
 
   const original = await readFileChecked(resolved.path, "source file");
   const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
-  const fullMatches = indexesOf(original, fullSource);
+  if (!original.equals(fullSource)) {
+    fail("source_not_found", `Whole-file source payload was not found in ${srcLabel}`, {
+      path: srcLabel,
+      phase: "source",
+      anchor: "blockpatch-source",
+      matches: 0
+    });
+  }
+
+  if (!dryRun) {
+    try {
+      await unlink(resolved.path);
+    } catch (error) {
+      failFileSystem(error, srcLabel, "Could not remove file");
+    }
+  }
+
+  return nullTargetResult(patch, srcLabel, dryRun, "applied", {
+    start: patch.sourceBefore.length,
+    end: patch.sourceBefore.length + patch.sourcePayload.length
+  });
+}
+
+function fullTargetBytes(patch: BlockPatch): Buffer {
+  const target = requireTarget(patch);
+  return Buffer.concat([target.before, patch.sourcePayload, target.after]);
+}
+
+function requireTarget(patch: BlockPatch): NonNullable<BlockPatch["target"]> {
+  if (patch.target === null) {
+    fail("parse_error", "Patch shape requires a blockpatch-target hunk");
+  }
+  return patch.target;
+}
+
+function findDeletionSourceRange(file: Buffer, patch: BlockPatch, srcLabel: string): ByteRange | undefined {
+  const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
+  const fullMatches = indexesOf(file, fullSource);
+
+  if (fullMatches.length === 1) {
+    const start = fullMatches[0] + patch.sourceBefore.length;
+    return { start, end: start + patch.sourcePayload.length };
+  }
 
   if (fullMatches.length > 1) {
     fail("source_ambiguous", `Source block is ambiguous in ${srcLabel}; matched ${fullMatches.length} locations`, {
@@ -286,38 +418,18 @@ async function applyNullTargetMove(
     });
   }
 
-  if (fullMatches.length === 0) {
-    return nullTargetAlreadyApplied(patch, srcLabel, dryRun, original, anchorless);
-  }
-
-  const start = fullMatches[0] + patch.sourceBefore.length;
-  const source = { start, end: start + patch.sourcePayload.length };
-  const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
-
-  if (!dryRun) {
-    if (next.length === 0) {
-      try {
-        await unlink(resolved.path);
-      } catch (error) {
-        failFileSystem(error, srcLabel, "Could not remove file");
-      }
-    } else {
-      await writeAtomically([{ path: resolved.path, bytes: next }]);
-    }
-  }
-  return nullTargetResult(patch, srcLabel, dryRun, "applied", source);
+  return deletionAlreadyAppliedOrFail(file, patch, srcLabel);
 }
 
-function nullTargetAlreadyApplied(
+function deletionAlreadyAppliedOrFail(
+  file: Buffer,
   patch: BlockPatch,
-  srcLabel: string,
-  dryRun: boolean,
-  original: Buffer,
-  anchorless: boolean
-): ApplyResult {
+  srcLabel: string
+): ByteRange | undefined {
+  const anchorless = patch.sourceBefore.length === 0 && patch.sourceAfter.length === 0;
   if (anchorless) {
-    if (indexesOf(original, patch.sourcePayload).length === 0) {
-      return nullTargetResult(patch, srcLabel, dryRun, "already_applied", null);
+    if (indexesOf(file, patch.sourcePayload).length === 0) {
+      return undefined;
     }
     fail("source_ambiguous", `Source payload is ambiguous in ${srcLabel}`, {
       path: srcLabel,
@@ -327,11 +439,21 @@ function nullTargetAlreadyApplied(
   }
 
   const adjacent = Buffer.concat([patch.sourceBefore, patch.sourceAfter]);
-  if (indexesOf(original, adjacent).length === 1) {
-    return nullTargetResult(patch, srcLabel, dryRun, "already_applied", null);
+  const adjacentMatches = indexesOf(file, adjacent);
+  if (adjacentMatches.length === 1) {
+    return undefined;
+  }
+  if (adjacentMatches.length > 1) {
+    fail("source_ambiguous", `Already-deleted source anchors are ambiguous in ${srcLabel}`, {
+      path: srcLabel,
+      phase: "source",
+      anchor: "blockpatch-source",
+      matches: adjacentMatches.length,
+      ranges: boundedMatchRanges(adjacentMatches, adjacent.length)
+    });
   }
 
-  const envelopes = findSourceEnvelopes(original, patch);
+  const envelopes = findSourceEnvelopes(file, patch);
   if (envelopes.length === 1) {
     fail("payload_mismatch", `Source payload does not match located source anchors in ${srcLabel}`, {
       path: srcLabel,
@@ -422,6 +544,7 @@ export function selectMove(
   sameFile: boolean
 ): MoveSelection {
   const dstLabel = patch.dst ?? devNull;
+  const targetAnchor = requireTarget(patch);
   const source = findSourceRange(srcFile, dstFile, patch);
   if (source === undefined) {
     fail("already_applied", `Patch is already applied in ${dstLabel}`, {
@@ -430,7 +553,7 @@ export function selectMove(
       anchor: "blockpatch-target"
     });
   }
-  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, dstLabel, {
+  const target = findTargetSelection(dstFile, targetAnchor.before, targetAnchor.after, dstLabel, {
     phase: "target",
     anchor: "blockpatch-target"
   });
@@ -445,6 +568,7 @@ function selectMovePlan(
 ): MovePlan {
   const srcLabel = patch.src ?? devNull;
   const dstLabel = patch.dst ?? devNull;
+  const targetAnchor = requireTarget(patch);
   const source = findSourceRange(srcFile, dstFile, patch);
   if (source === undefined) {
     const target = findAlreadyAppliedTargetSelection(dstFile, patch);
@@ -469,7 +593,7 @@ function selectMovePlan(
     };
   }
 
-  const target = findTargetSelection(dstFile, patch.target.before, patch.target.after, dstLabel, {
+  const target = findTargetSelection(dstFile, targetAnchor.before, targetAnchor.after, dstLabel, {
     phase: "target",
     anchor: "blockpatch-target"
   });
@@ -625,7 +749,8 @@ function findAlreadyAppliedTargetSelection(
   patch: BlockPatch,
   dstLabel: string = patch.dst ?? devNull
 ): TargetSelection | undefined {
-  const alreadyApplied = Buffer.concat([patch.target.before, patch.sourcePayload, patch.target.after]);
+  const target = requireTarget(patch);
+  const alreadyApplied = Buffer.concat([target.before, patch.sourcePayload, target.after]);
   const matches = indexesOf(file, alreadyApplied);
 
   if (matches.length === 0) {
@@ -649,7 +774,7 @@ function findAlreadyAppliedTargetSelection(
   const start = matches[0];
   return {
     range: { start, end: start + alreadyApplied.length },
-    insertIndex: start + patch.target.before.length
+    insertIndex: start + target.before.length
   };
 }
 

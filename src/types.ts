@@ -7,10 +7,11 @@ export interface BlockPatch {
   src: string | null;
   dst: string | null;
   payloadSha256: string;
+  hasSourceHunk: boolean;
   sourceBefore: Buffer;
   sourcePayload: Buffer;
   sourceAfter: Buffer;
-  target: TargetAnchor;
+  target: TargetAnchor | null;
 }
 
 export interface TargetAnchor {
@@ -54,9 +55,10 @@ export interface ApplyResult {
 
 export interface MoveBlockArgs {
   src: string;
-  src_start: string;
-  src_end: string;
+  src_start?: string;
+  src_end?: string;
   dst?: string;
+  payload?: string;
   target_before?: string;
   target_after?: string;
   expected_payload_sha256?: string;

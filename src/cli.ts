@@ -269,6 +269,8 @@ function argToMoveKey(arg: string | undefined): keyof MoveBlockArgs | undefined 
       return "src_end";
     case "--dst":
       return "dst";
+    case "--payload":
+      return "payload";
     case "--target-before":
       return "target_before";
     case "--target-after":
@@ -397,6 +399,8 @@ Usage:
   blockpatch apply [patch.blockpatch|-] [-i <patch.blockpatch>] [-d <dir>] [-pN] [-R|--reverse] [--dry-run] [--json-output|--explain]
   blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--json-output|--explain]
   blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --target-before <text> --target-after <text> [--expected-payload-sha256 <sha256>]
+  blockpatch move --src /dev/null --dst <path> --payload <text> --target-before <text>
+  blockpatch move --src <path> --src-start <text> --src-end <text> --dst /dev/null
   blockpatch version
 `);
 }

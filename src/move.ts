@@ -10,13 +10,17 @@ import {
   indexesOf,
   moveResultDetails,
   unique,
+  writeAtomic,
   type ByteRange,
+  type TargetSelection,
   type MoveSelection
 } from "./engine";
+import { devNull } from "./parser";
 import { resolvePath, sameFileIdentity } from "./paths";
 import type { MoveBlockArgs, MoveBlockOptions, MoveBlockResult } from "./types";
 
-interface NormalizedMoveBlockArgs {
+interface NormalizedRelocationArgs {
+  kind: "relocation";
   src: string;
   srcStart: Buffer;
   srcEnd: Buffer;
@@ -25,11 +29,31 @@ interface NormalizedMoveBlockArgs {
   targetAfter: Buffer;
 }
 
+interface NormalizedInsertionArgs {
+  kind: "insertion";
+  src: typeof devNull;
+  dst: string;
+  payload: Buffer;
+  targetBefore: Buffer;
+  targetAfter: Buffer;
+}
+
+interface NormalizedDeletionArgs {
+  kind: "deletion";
+  src: string;
+  srcStart: Buffer;
+  srcEnd: Buffer;
+  dst: typeof devNull;
+}
+
+type NormalizedMoveBlockArgs = NormalizedRelocationArgs | NormalizedInsertionArgs | NormalizedDeletionArgs;
+
 const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   src: "string",
   src_start: "string",
   src_end: "string",
   dst: "string",
+  payload: "string",
   target_before: "string",
   target_after: "string",
   expected_payload_sha256: "string",
@@ -45,6 +69,13 @@ export async function moveBlock(
   const normalized = normalizeArgs(validated);
   const cwd = options.cwd ?? process.cwd();
   const dryRun = options.dryRun ?? validated.dry_run ?? false;
+  if (normalized.kind === "insertion") {
+    return insertPayload(normalized, validated, cwd, dryRun, options);
+  }
+  if (normalized.kind === "deletion") {
+    return deletePayload(normalized, validated, cwd, dryRun, options);
+  }
+
   const srcPath = resolvePath(cwd, normalized.src, "source path");
   const dstPath = resolvePath(cwd, normalized.dst, "destination path");
   const sameFile = await sameFileIdentity(srcPath, dstPath);
@@ -57,13 +88,7 @@ export async function moveBlock(
   });
   const selection = buildMoveSelection(srcOriginal, source, target, sameFile, normalized.dst);
   const payloadSha256 = createHash("sha256").update(selection.payload).digest("hex");
-  if (validated.expected_payload_sha256 !== undefined && validated.expected_payload_sha256 !== payloadSha256) {
-    fail("hash_mismatch", "expected_payload_sha256 does not match selected source payload", {
-      field: "expected_payload_sha256",
-      phase: "payload",
-      anchor: "expected_payload_sha256"
-    });
-  }
+  verifyExpectedPayloadHash(validated, payloadSha256);
   const samePatchLabel = samePatchPath(normalized.src, normalized.dst);
   const patch = options.diff
     ? renderMovePatch(normalized, srcOriginal, dstOriginal, selection, sameFile && samePatchLabel, payloadSha256)
@@ -133,13 +158,74 @@ function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
   if (!args.src) {
     fail("invalid_move_args", "move requires src", { field: "src" });
   }
-  if (!args.src_start) {
-    fail("invalid_move_args", "move requires src_start", { field: "src_start" });
-  }
-  if (!args.src_end) {
-    fail("invalid_move_args", "move requires src_end", { field: "src_end" });
+
+  const dst = args.dst ?? args.src;
+  if (args.src === devNull && dst === devNull) {
+    fail("invalid_move_args", "move cannot use /dev/null for both src and dst", { field: "dst" });
   }
 
+  if (args.src === devNull) {
+    if (args.dst === undefined) {
+      fail("invalid_move_args", "move from /dev/null requires dst", { field: "dst" });
+    }
+    if (args.src_start !== undefined || args.src_end !== undefined) {
+      fail("invalid_move_args", "move from /dev/null uses payload instead of src_start/src_end", {
+        field: args.src_start !== undefined ? "src_start" : "src_end"
+      });
+    }
+    if (args.payload === undefined) {
+      fail("invalid_move_args", "move from /dev/null requires payload", { field: "payload" });
+    }
+    if (args.payload.length === 0) {
+      fail("invalid_move_args", "move from /dev/null requires non-empty payload", { field: "payload" });
+    }
+    const target = normalizeTargetArgs(args);
+    return {
+      kind: "insertion",
+      src: devNull,
+      dst: args.dst,
+      payload: Buffer.from(args.payload, "utf8"),
+      targetBefore: target.before,
+      targetAfter: target.after
+    };
+  }
+
+  if (dst === devNull) {
+    if (args.payload !== undefined) {
+      fail("invalid_move_args", "move to /dev/null selects payload from src_start/src_end", { field: "payload" });
+    }
+    if (args.target_before !== undefined || args.target_after !== undefined) {
+      fail("invalid_move_args", "move to /dev/null must not include target anchors", {
+        field: args.target_before !== undefined ? "target_before" : "target_after"
+      });
+    }
+    return {
+      kind: "deletion",
+      src: args.src,
+      srcStart: requiredBuffer(args.src_start, "src_start"),
+      srcEnd: requiredBuffer(args.src_end, "src_end"),
+      dst: devNull
+    };
+  }
+
+  if (args.payload !== undefined) {
+    fail("invalid_move_args", "payload is only valid when src is /dev/null", { field: "payload" });
+  }
+
+  const target = normalizeTargetArgs(args);
+
+  return {
+    kind: "relocation",
+    src: args.src,
+    srcStart: requiredBuffer(args.src_start, "src_start"),
+    srcEnd: requiredBuffer(args.src_end, "src_end"),
+    dst,
+    targetBefore: target.before,
+    targetAfter: target.after
+  };
+}
+
+function normalizeTargetArgs(args: MoveBlockArgs): { before: Buffer; after: Buffer } {
   const hasTargetBefore = args.target_before !== undefined;
   const hasTargetAfter = args.target_after !== undefined;
 
@@ -154,17 +240,176 @@ function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
     fail("invalid_move_args", "move requires non-empty target context", { field: "target_before" });
   }
 
+  return { before: targetBefore, after: targetAfter };
+}
+
+function requiredBuffer(value: string | undefined, field: "src_start" | "src_end"): Buffer {
+  if (!value) {
+    fail("invalid_move_args", `move requires ${field}`, { field });
+  }
+  return Buffer.from(value, "utf8");
+}
+
+async function insertPayload(
+  args: NormalizedInsertionArgs,
+  validated: MoveBlockArgs,
+  cwd: string,
+  dryRun: boolean,
+  options: MoveBlockOptions
+): Promise<MoveBlockResult> {
+  const dstPath = resolvePath(cwd, args.dst, "destination path");
+  const original = await readFileChecked(dstPath, "destination file");
+  const payloadSha256 = createHash("sha256").update(args.payload).digest("hex");
+  verifyExpectedPayloadHash(validated, payloadSha256);
+
+  const alreadyApplied = findAlreadyAppliedTarget(original, args, args.dst);
+  if (alreadyApplied !== undefined) {
+    const renderedPatch = options.diff ? renderInsertionPatch(args, original, alreadyApplied, payloadSha256) : undefined;
+    return {
+      changed: [],
+      affected: [args.dst],
+      written: false,
+      noop: true,
+      status: "already_applied",
+      moves: [
+        {
+          id: "move-1",
+          src: devNull,
+          dst: args.dst,
+          payload_sha256: payloadSha256,
+          payload_bytes: args.payload.length,
+          source_range: null,
+          target_range: alreadyApplied.range,
+          insert_index: alreadyApplied.insertIndex
+        }
+      ],
+      patch: renderedPatch
+    };
+  }
+
+  const target = findTargetSelection(original, args.targetBefore, args.targetAfter, args.dst, {
+    phase: "target",
+    anchor: targetAnchorName(args)
+  });
+  const renderedPatch = options.diff ? renderInsertionPatch(args, original, target, payloadSha256) : undefined;
+  const writeSuppressed = dryRun || options.diff === true;
+  const next = Buffer.concat([
+    original.subarray(0, target.insertIndex),
+    args.payload,
+    original.subarray(target.insertIndex)
+  ]);
+  const changed = next.equals(original) ? [] : [args.dst];
+
+  if (!writeSuppressed && changed.length > 0) {
+    await writeAtomic(dstPath, next);
+  }
+
   return {
-    src: args.src,
-    srcStart: Buffer.from(args.src_start, "utf8"),
-    srcEnd: Buffer.from(args.src_end, "utf8"),
-    dst: args.dst ?? args.src,
-    targetBefore,
-    targetAfter
+    changed,
+    affected: [args.dst],
+    written: !writeSuppressed && changed.length > 0,
+    noop: changed.length === 0,
+    status: changed.length === 0 ? "noop" : "applied",
+    moves: [
+      {
+        id: "move-1",
+        src: devNull,
+        dst: args.dst,
+        payload_sha256: payloadSha256,
+        payload_bytes: args.payload.length,
+        source_range: null,
+        target_range: target.range,
+        insert_index: target.insertIndex
+      }
+    ],
+    patch: renderedPatch
   };
 }
 
-function findSource(file: Buffer, args: NormalizedMoveBlockArgs): ByteRange {
+function verifyExpectedPayloadHash(args: MoveBlockArgs, payloadSha256: string): void {
+  if (args.expected_payload_sha256 !== undefined && args.expected_payload_sha256 !== payloadSha256) {
+    fail("hash_mismatch", "expected_payload_sha256 does not match selected source payload", {
+      field: "expected_payload_sha256",
+      phase: "payload",
+      anchor: "expected_payload_sha256"
+    });
+  }
+}
+
+function findAlreadyAppliedTarget(
+  file: Buffer,
+  args: NormalizedInsertionArgs,
+  dstLabel: string
+): TargetSelection | undefined {
+  const alreadyApplied = Buffer.concat([args.targetBefore, args.payload, args.targetAfter]);
+  const matches = indexesOf(file, alreadyApplied);
+
+  if (matches.length === 0) {
+    return undefined;
+  }
+  if (matches.length > 1) {
+    fail("target_ambiguous", `Already-applied target is ambiguous in ${dstLabel}; matched ${matches.length} locations`, {
+      path: dstLabel,
+      phase: "target",
+      anchor: "target_before+payload+target_after",
+      matches: matches.length,
+      ranges: boundedRanges(matches.map((start) => ({ start, end: start + alreadyApplied.length })))
+    });
+  }
+
+  const start = matches[0];
+  return {
+    range: { start, end: start + alreadyApplied.length },
+    insertIndex: start + args.targetBefore.length
+  };
+}
+
+async function deletePayload(
+  args: NormalizedDeletionArgs,
+  validated: MoveBlockArgs,
+  cwd: string,
+  dryRun: boolean,
+  options: MoveBlockOptions
+): Promise<MoveBlockResult> {
+  const srcPath = resolvePath(cwd, args.src, "source path");
+  const original = await readFileChecked(srcPath, "source file");
+  const source = findSource(original, args);
+  const payload = Buffer.from(original.subarray(source.start, source.end));
+  const payloadSha256 = createHash("sha256").update(payload).digest("hex");
+  verifyExpectedPayloadHash(validated, payloadSha256);
+
+  const renderedPatch = options.diff ? renderDeletionPatch(args, original, source, payload, payloadSha256) : undefined;
+  const writeSuppressed = dryRun || options.diff === true;
+  const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
+  const changed = next.equals(original) ? [] : [args.src];
+
+  if (!writeSuppressed && changed.length > 0) {
+    await writeAtomic(srcPath, next);
+  }
+
+  return {
+    changed,
+    affected: [args.src],
+    written: !writeSuppressed && changed.length > 0,
+    noop: changed.length === 0,
+    status: changed.length === 0 ? "noop" : "applied",
+    moves: [
+      {
+        id: "move-1",
+        src: args.src,
+        dst: devNull,
+        payload_sha256: payloadSha256,
+        payload_bytes: payload.length,
+        source_range: source,
+        target_range: null,
+        insert_index: null
+      }
+    ],
+    patch: renderedPatch
+  };
+}
+
+function findSource(file: Buffer, args: NormalizedRelocationArgs | NormalizedDeletionArgs): ByteRange {
   const startMatches = indexesOf(file, args.srcStart);
   const ranges: ByteRange[] = [];
 
@@ -197,7 +442,7 @@ function findSource(file: Buffer, args: NormalizedMoveBlockArgs): ByteRange {
   return ranges[0];
 }
 
-function targetAnchorName(args: NormalizedMoveBlockArgs): string {
+function targetAnchorName(args: NormalizedRelocationArgs | NormalizedInsertionArgs): string {
   if (args.targetBefore.length > 0 && args.targetAfter.length > 0) {
     return "target_before+target_after";
   }
@@ -209,7 +454,7 @@ function samePatchPath(left: string, right: string): boolean {
 }
 
 function renderMovePatch(
-  args: NormalizedMoveBlockArgs,
+  args: NormalizedRelocationArgs,
   srcOriginal: Buffer,
   dstOriginal: Buffer,
   selection: MoveSelection,
@@ -295,6 +540,77 @@ function renderMovePatch(
     sourceBody,
     targetHunkHeader,
     targetBody
+  ].join("\n") + "\n";
+}
+
+function renderInsertionPatch(
+  args: NormalizedInsertionArgs,
+  dstOriginal: Buffer,
+  target: TargetSelection,
+  payloadSha256: string
+): string {
+  const id = "move-1";
+  const targetBefore =
+    args.targetBefore.length === 0
+      ? adjacentLineBefore(dstOriginal, target.range.start)
+      : args.targetBefore;
+  const targetAfter =
+    args.targetAfter.length === 0
+      ? adjacentLineAfter(dstOriginal, target.range.end)
+      : args.targetAfter;
+  const payloadLines = countLines(args.payload);
+  const targetHunkStart = target.insertIndex - targetBefore.length;
+  const targetOldStart = lineNumberAt(dstOriginal, targetHunkStart);
+  const targetOldCount = countLines(targetBefore) + countLines(targetAfter);
+  const targetNewCount = targetOldCount + payloadLines;
+  const targetBody = joinPatchChunks([
+    renderHunkBytes(targetBefore, " "),
+    renderHunkBytes(args.payload, "+"),
+    renderHunkBytes(targetAfter, " ")
+  ]);
+
+  return [
+    `diff --blockpatch a/${args.dst} b/${args.dst}`,
+    "blockpatch version 1",
+    `blockpatch move id=${id} payload-sha256=${payloadSha256}`,
+    `--- a/${args.dst}`,
+    `+++ b/${args.dst}`,
+    "",
+    `@@ -${targetOldStart},${targetOldCount} +${targetOldStart},${targetNewCount} @@ blockpatch-target id=${id}`,
+    targetBody
+  ].join("\n") + "\n";
+}
+
+function renderDeletionPatch(
+  args: NormalizedDeletionArgs,
+  srcOriginal: Buffer,
+  source: ByteRange,
+  payload: Buffer,
+  payloadSha256: string
+): string {
+  const id = "move-1";
+  const sourceBefore = adjacentLineBefore(srcOriginal, source.start);
+  const sourceAfter = adjacentLineAfter(srcOriginal, source.end);
+  const payloadLines = countLines(payload);
+  const sourceHunkStart = source.start - sourceBefore.length;
+  const sourceOldStart = lineNumberAt(srcOriginal, sourceHunkStart);
+  const sourceOldCount = countLines(sourceBefore) + payloadLines + countLines(sourceAfter);
+  const sourceNewCount = sourceOldCount - payloadLines;
+  const sourceBody = joinPatchChunks([
+    renderHunkBytes(sourceBefore, " "),
+    renderHunkBytes(payload, "-"),
+    renderHunkBytes(sourceAfter, " ")
+  ]);
+
+  return [
+    `diff --blockpatch a/${args.src} b/${args.src}`,
+    "blockpatch version 1",
+    `blockpatch move id=${id} payload-sha256=${payloadSha256}`,
+    `--- a/${args.src}`,
+    `+++ b/${args.src}`,
+    "",
+    `@@ -${sourceOldStart},${sourceOldCount} +${sourceOldStart},${sourceNewCount} @@ blockpatch-source id=${id}`,
+    sourceBody
   ].join("\n") + "\n";
 }
 

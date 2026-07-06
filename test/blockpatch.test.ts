@@ -799,6 +799,152 @@ describe("CLI", () => {
     expect(actual).toBe("alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n");
   });
 
+  test("move --json inserts payload from /dev/null", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-json-insert-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nomega\n");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "/dev/null",
+        dst: "file.txt",
+        payload: "new line\n",
+        target_before: "alpha\n",
+        target_after: "omega\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      moves: Array<{ src: string; dst: string; source_range: null; insert_index: number }>;
+    };
+    expect(stdout.ok).toBe(true);
+    expect(stdout.changed).toEqual(["file.txt"]);
+    expect(stdout.moves[0]).toMatchObject({
+      src: "/dev/null",
+      dst: "file.txt",
+      source_range: null,
+      insert_index: "alpha\n".length
+    });
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nnew line\nomega\n");
+  });
+
+  test("move --json deletes payload to /dev/null", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-json-delete-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nfunction removeMe() {\n  return 1;\n}\nomega\n");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "file.txt",
+        src_start: "function removeMe() {\n",
+        src_end: "}\n",
+        dst: "/dev/null"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      moves: Array<{ src: string; dst: string; target_range: null; insert_index: null }>;
+    };
+    expect(stdout.ok).toBe(true);
+    expect(stdout.changed).toEqual(["file.txt"]);
+    expect(stdout.moves[0]).toMatchObject({
+      src: "file.txt",
+      dst: "/dev/null",
+      target_range: null,
+      insert_index: null
+    });
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nomega\n");
+  });
+
+  test("move --diff for /dev/null insertion emits target-only same-file patch", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-json-insert-diff-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nomega\n");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--diff", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "/dev/null",
+        dst: "file.txt",
+        payload: "new line\n",
+        target_before: "alpha\n",
+        target_after: "omega\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("diff --blockpatch a/file.txt b/file.txt");
+    expect(stdout).toContain("@@ -1,2 +1,3 @@ blockpatch-target id=move-1");
+    expect(stdout).toContain("+new line");
+    expect(stdout).not.toContain("blockpatch-source");
+    expect(stdout).not.toContain("/dev/null");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nomega\n");
+
+    await writeFile(join(cwd, "generated.blockpatch"), stdout);
+    await applyPatchFile("generated.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nnew line\nomega\n");
+  });
+
+  test("move --diff for /dev/null deletion emits source-only same-file patch", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-json-delete-diff-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nfunction removeMe() {\n  return 1;\n}\nomega\n");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--diff", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "file.txt",
+        src_start: "function removeMe() {\n",
+        src_end: "}\n",
+        dst: "/dev/null"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("diff --blockpatch a/file.txt b/file.txt");
+    expect(stdout).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
+    expect(stdout).toContain("-function removeMe() {");
+    expect(stdout).not.toContain("blockpatch-target");
+    expect(stdout).not.toContain("/dev/null");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe(
+      "alpha\nfunction removeMe() {\n  return 1;\n}\nomega\n"
+    );
+
+    await writeFile(join(cwd, "generated.blockpatch"), stdout);
+    await applyPatchFile("generated.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nomega\n");
+  });
+
   test("move --json-output prints machine-readable success details", async () => {
     const cwd = await moveFixture();
     const before = await readFile(join(cwd, "source.ts"), "utf8");
@@ -2593,7 +2739,7 @@ function corruptConformanceSourceCount(patchText: string): string {
   );
 }
 
-describe("null endpoints", () => {
+describe("one-sided hunks and null endpoints", () => {
   const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
 
   async function fileExists(path: string): Promise<boolean> {
@@ -2605,9 +2751,61 @@ describe("null endpoints", () => {
     }
   }
 
+  function countPatchLines(text: string): number {
+    if (text.length === 0) {
+      return 0;
+    }
+    const newlineCount = text.split("\n").length - 1;
+    return text.endsWith("\n") ? newlineCount : newlineCount + 1;
+  }
+
+  function prefixedPayload(text: string, prefix: "+" | "-"): string {
+    if (text.length === 0) {
+      return "";
+    }
+    return text
+      .split(/(?<=\n)/)
+      .filter((line) => line.length > 0)
+      .map((line) => `${prefix}${line.endsWith("\n") ? line.slice(0, -1) : line}\n`)
+      .join("");
+  }
+
   function insertionPatch(payload: string, before: string, after: string, path = "file.txt"): string {
     const oldCount = (before ? 1 : 0) + (after ? 1 : 0);
-    const newCount = oldCount + payload.split("\n").filter((line) => line.length > 0).length;
+    const newCount = oldCount + countPatchLines(payload);
+    return (
+      `diff --blockpatch a/${path} b/${path}\n` +
+      "blockpatch version 1\n" +
+      `blockpatch move id=move-1 payload-sha256=${sha(payload)}\n` +
+      `--- a/${path}\n` +
+      `+++ b/${path}\n` +
+      "\n" +
+      `@@ -1,${oldCount} +1,${newCount} @@ blockpatch-target id=move-1\n` +
+      (before ? ` ${before}\n` : "") +
+      prefixedPayload(payload, "+") +
+      (after ? ` ${after}\n` : "")
+    );
+  }
+
+  function deletionPatch(payload: string, before: string, after: string, path = "file.txt"): string {
+    const contextCount = (before ? 1 : 0) + (after ? 1 : 0);
+    const payloadLineCount = countPatchLines(payload);
+    return (
+      `diff --blockpatch a/${path} b/${path}\n` +
+      "blockpatch version 1\n" +
+      `blockpatch move id=move-1 payload-sha256=${sha(payload)}\n` +
+      `--- a/${path}\n` +
+      `+++ b/${path}\n` +
+      "\n" +
+      `@@ -1,${contextCount + payloadLineCount} +${contextCount === 0 ? "0,0" : `1,${contextCount}`} @@ blockpatch-source id=move-1\n` +
+      (before ? ` ${before}\n` : "") +
+      prefixedPayload(payload, "-") +
+      (after ? ` ${after}\n` : "")
+    );
+  }
+
+  function creationPatch(payload: string, path = "file.txt"): string {
+    const payloadLineCount = countPatchLines(payload);
     return (
       `diff --blockpatch /dev/null b/${path}\n` +
       "blockpatch version 1\n" +
@@ -2615,20 +2813,13 @@ describe("null endpoints", () => {
       "--- /dev/null\n" +
       `+++ b/${path}\n` +
       "\n" +
-      `@@ -${oldCount === 0 ? "0,0" : `1,${oldCount}`} +1,${newCount} @@ blockpatch-target id=move-1\n` +
-      (before ? ` ${before}\n` : "") +
-      payload
-        .split("\n")
-        .filter((line) => line.length > 0)
-        .map((line) => `+${line}\n`)
-        .join("") +
-      (after ? ` ${after}\n` : "")
+      `@@ -0,0 +${payloadLineCount === 0 ? "0,0" : `1,${payloadLineCount}`} @@ blockpatch-target id=move-1\n` +
+      prefixedPayload(payload, "+")
     );
   }
 
-  function deletionPatch(payload: string, before: string, after: string, path = "file.txt"): string {
-    const contextCount = (before ? 1 : 0) + (after ? 1 : 0);
-    const payloadLines = payload.split("\n").filter((line) => line.length > 0);
+  function removalPatch(payload: string, path = "file.txt"): string {
+    const payloadLineCount = countPatchLines(payload);
     return (
       `diff --blockpatch a/${path} /dev/null\n` +
       "blockpatch version 1\n" +
@@ -2636,14 +2827,12 @@ describe("null endpoints", () => {
       `--- a/${path}\n` +
       "+++ /dev/null\n" +
       "\n" +
-      `@@ -1,${contextCount + payloadLines.length} +${contextCount === 0 ? "0,0" : `1,${contextCount}`} @@ blockpatch-source id=move-1\n` +
-      (before ? ` ${before}\n` : "") +
-      payloadLines.map((line) => `-${line}\n`).join("") +
-      (after ? ` ${after}\n` : "")
+      `@@ -${payloadLineCount === 0 ? "0,0" : `1,${payloadLineCount}`} +0,0 @@ blockpatch-source id=move-1\n` +
+      prefixedPayload(payload, "-")
     );
   }
 
-  test("anchored insertion applies and retries as already_applied", async () => {
+  test("target-only insertion applies, retries, and reverses", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-"));
     await writeFile(join(cwd, "file.txt"), "alpha\nomega\n");
     await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("new line\n", "alpha", "omega"));
@@ -2654,7 +2843,7 @@ describe("null endpoints", () => {
     expect(result.written).toBe(true);
     expect(result.status).toBe("applied");
     expect(result.moves[0]).toMatchObject({
-      src: "/dev/null",
+      src: "file.txt",
       dst: "file.txt",
       payload_sha256: sha("new line\n"),
       payload_bytes: "new line\n".length,
@@ -2666,67 +2855,14 @@ describe("null endpoints", () => {
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nnew line\nomega\n");
     expect(retry.changed).toEqual([]);
     expect(retry.status).toBe("already_applied");
-  });
-
-  test("reverse of an applied insertion deletes the payload", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-reverse-"));
-    await writeFile(join(cwd, "file.txt"), "alpha\nomega\n");
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("new line\n", "alpha", "omega"));
-    await applyPatchFile("patch.blockpatch", { cwd });
 
     const reversed = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nomega\n");
     expect(reversed.status).toBe("applied");
-    expect(reversed.moves[0]).toMatchObject({ src: "file.txt", dst: "/dev/null", target_range: null });
+    expect(reversed.moves[0]).toMatchObject({ src: "file.txt", dst: "file.txt", target_range: null });
   });
 
-  test("anchorless insertion creates a missing file", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-"));
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("one\ntwo\n", "", ""));
-
-    const result = await applyPatchFile("patch.blockpatch", { cwd });
-    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("one\ntwo\n");
-    expect(result.status).toBe("applied");
-    expect(result.changed).toEqual(["file.txt"]);
-
-    const retry = await applyPatchFile("patch.blockpatch", { cwd });
-    expect(retry.status).toBe("already_applied");
-    expect(retry.changed).toEqual([]);
-  });
-
-  test("anchorless insertion creates parent directories", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-nested-"));
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("one\n", "", "", "src/deep/new.txt"));
-
-    await applyPatchFile("patch.blockpatch", { cwd });
-    expect(await readFile(join(cwd, "src/deep/new.txt"), "utf8")).toBe("one\n");
-  });
-
-  test("reverse of a file creation removes the file", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-reverse-"));
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("one\ntwo\n", "", ""));
-    await applyPatchFile("patch.blockpatch", { cwd });
-    expect(await fileExists(join(cwd, "file.txt"))).toBe(true);
-
-    const reversed = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
-    expect(reversed.status).toBe("applied");
-    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
-
-    const retry = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
-    expect(retry.status).toBe("already_applied");
-  });
-
-  test("dry-run creation writes nothing", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-dry-"));
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("one\n", "", ""));
-
-    const result = await applyPatchFile("patch.blockpatch", { cwd, dryRun: true });
-    expect(result.changed).toEqual(["file.txt"]);
-    expect(result.written).toBe(false);
-    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
-  });
-
-  test("anchored insertion into a missing file is file_not_found", async () => {
+  test("target-only insertion into a missing file is file_not_found", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-missing-"));
     await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("new line\n", "alpha", "omega"));
 
@@ -2741,33 +2877,7 @@ describe("null endpoints", () => {
     expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
   });
 
-  test("anchorless insertion into a non-empty file is rejected", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-nonempty-"));
-    await writeFile(join(cwd, "file.txt"), "existing\n");
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("one\n", "", ""));
-
-    let error: unknown;
-    try {
-      await applyPatchFile("patch.blockpatch", { cwd });
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(BlockPatchError);
-    expect((error as BlockPatchError).code).toBe("target_not_found");
-    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("existing\n");
-  });
-
-  test("anchorless insertion fills an existing empty file", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-empty-"));
-    await writeFile(join(cwd, "file.txt"), "");
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("one\n", "", ""));
-
-    const result = await applyPatchFile("patch.blockpatch", { cwd });
-    expect(result.status).toBe("applied");
-    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("one\n");
-  });
-
-  test("insertion hash mismatch is rejected without writing", async () => {
+  test("target-only insertion hash mismatch is rejected without writing", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-hash-"));
     await writeFile(join(cwd, "file.txt"), "alpha\nomega\n");
     const patch = insertionPatch("new line\n", "alpha", "omega").replace(sha("new line\n"), sha("different\n"));
@@ -2777,7 +2887,7 @@ describe("null endpoints", () => {
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nomega\n");
   });
 
-  test("anchored deletion applies, retries as already_applied, and reverses", async () => {
+  test("source-only deletion applies, retries, and reverses", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-"));
     await writeFile(join(cwd, "file.txt"), "alpha\ndoomed\nomega\n");
     await writeFile(join(cwd, "patch.blockpatch"), deletionPatch("doomed\n", "alpha", "omega"));
@@ -2787,7 +2897,7 @@ describe("null endpoints", () => {
     expect(result.status).toBe("applied");
     expect(result.moves[0]).toMatchObject({
       src: "file.txt",
-      dst: "/dev/null",
+      dst: "file.txt",
       source_range: { start: "alpha\n".length, end: "alpha\ndoomed\n".length },
       target_range: null,
       insert_index: null
@@ -2802,34 +2912,18 @@ describe("null endpoints", () => {
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\ndoomed\nomega\n");
   });
 
-  test("deleting the last byte removes the file", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-file-"));
+  test("source-only deletion of all bytes keeps an empty file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-empty-result-"));
     await writeFile(join(cwd, "file.txt"), "only\ncontent\n");
     await writeFile(join(cwd, "patch.blockpatch"), deletionPatch("only\ncontent\n", "", ""));
 
     const result = await applyPatchFile("patch.blockpatch", { cwd });
     expect(result.status).toBe("applied");
-    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
-
-    const retry = await applyPatchFile("patch.blockpatch", { cwd });
-    expect(retry.status).toBe("already_applied");
-
-    const reversed = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
-    expect(reversed.status).toBe("applied");
-    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("only\ncontent\n");
-  });
-
-  test("deletion keeping bytes keeps the file", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-keep-"));
-    await writeFile(join(cwd, "file.txt"), "alpha\ndoomed\n");
-    await writeFile(join(cwd, "patch.blockpatch"), deletionPatch("doomed\n", "alpha", ""));
-
-    await applyPatchFile("patch.blockpatch", { cwd });
-    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\n");
     expect(await fileExists(join(cwd, "file.txt"))).toBe(true);
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("");
   });
 
-  test("anchored deletion of a missing file is file_not_found", async () => {
+  test("source-only deletion of a missing file is file_not_found", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-missing-"));
     await writeFile(join(cwd, "patch.blockpatch"), deletionPatch("doomed\n", "alpha", "omega"));
 
@@ -2843,7 +2937,7 @@ describe("null endpoints", () => {
     expect((error as BlockPatchError).code).toBe("file_not_found");
   });
 
-  test("deletion payload mismatch at located anchors is payload_mismatch", async () => {
+  test("source-only deletion payload mismatch at located anchors is payload_mismatch", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-mismatch-"));
     await writeFile(join(cwd, "file.txt"), "alpha\nsurprise\nomega\n");
     await writeFile(join(cwd, "patch.blockpatch"), deletionPatch("doomed\n", "alpha", "omega"));
@@ -2857,6 +2951,127 @@ describe("null endpoints", () => {
     expect(error).toBeInstanceOf(BlockPatchError);
     expect((error as BlockPatchError).code).toBe("payload_mismatch");
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nsurprise\nomega\n");
+  });
+
+  test("null source creates a missing file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-"));
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\ntwo\n"));
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("one\ntwo\n");
+    expect(result.status).toBe("applied");
+    expect(result.changed).toEqual(["file.txt"]);
+
+    const retry = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(retry.status).toBe("already_applied");
+    expect(retry.changed).toEqual([]);
+  });
+
+  test("null source creates parent directories", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-nested-"));
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\n", "src/deep/new.txt"));
+
+    await applyPatchFile("patch.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "src/deep/new.txt"), "utf8")).toBe("one\n");
+  });
+
+  test("null source can create and reverse an empty file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-empty-"));
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch(""));
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.status).toBe("applied");
+    expect(await fileExists(join(cwd, "file.txt"))).toBe(true);
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("");
+
+    const reversed = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
+    expect(reversed.status).toBe("applied");
+    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
+  });
+
+  test("reverse of a null-source file creation removes the file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-reverse-"));
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\ntwo\n"));
+    await applyPatchFile("patch.blockpatch", { cwd });
+    expect(await fileExists(join(cwd, "file.txt"))).toBe(true);
+
+    const reversed = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
+    expect(reversed.status).toBe("applied");
+    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
+
+    const retry = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
+    expect(retry.status).toBe("already_applied");
+  });
+
+  test("dry-run creation writes nothing", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-dry-"));
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\n"));
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd, dryRun: true });
+    expect(result.changed).toEqual(["file.txt"]);
+    expect(result.written).toBe(false);
+    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
+  });
+
+  test("null source into an existing non-empty file is rejected", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-nonempty-"));
+    await writeFile(join(cwd, "file.txt"), "existing\n");
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\n"));
+
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("target_not_found");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("existing\n");
+  });
+
+  test("null source does not treat an existing empty file as missing", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-empty-"));
+    await writeFile(join(cwd, "file.txt"), "");
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\n"));
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("already exists");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("");
+  });
+
+  test("null target removes a whole file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-file-"));
+    await writeFile(join(cwd, "file.txt"), "only\ncontent\n");
+    await writeFile(join(cwd, "patch.blockpatch"), removalPatch("only\ncontent\n"));
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.status).toBe("applied");
+    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
+
+    const retry = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(retry.status).toBe("already_applied");
+
+    const reversed = await applyPatchFile("patch.blockpatch", { cwd, reverse: true });
+    expect(reversed.status).toBe("applied");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("only\ncontent\n");
+  });
+
+  test("null target removes an empty file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-empty-file-"));
+    await writeFile(join(cwd, "file.txt"), "");
+    await writeFile(join(cwd, "patch.blockpatch"), removalPatch(""));
+
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.status).toBe("applied");
+    expect(await fileExists(join(cwd, "file.txt"))).toBe(false);
+  });
+
+  test("null target requires whole-file payload", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-partial-file-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\ndoomed\n");
+    await writeFile(join(cwd, "patch.blockpatch"), removalPatch("doomed\n"));
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("Whole-file source payload");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\ndoomed\n");
   });
 
   test("both endpoints as /dev/null is a parse error", async () => {
@@ -2879,21 +3094,22 @@ describe("null endpoints", () => {
     );
   });
 
-  test("null endpoints reject role metadata", async () => {
+  test("null role-only section is accepted for file creation", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-null-role-"));
-    const patch = insertionPatch("one\n", "", "").replace("id=move-1 payload", "id=move-1 role=target payload");
+    const patch = creationPatch("one\n").replace("id=move-1 payload", "id=move-1 role=target payload");
     await writeFile(join(cwd, "patch.blockpatch"), patch);
 
-    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("role metadata is not valid");
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.status).toBe("applied");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("one\n");
   });
 
   test("null endpoint paths are not resolved against the filesystem", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-null-real-devnull-"));
-    await writeFile(join(cwd, "file.txt"), "alpha\nomega\n");
-    await writeFile(join(cwd, "patch.blockpatch"), insertionPatch("new line\n", "alpha", "omega"));
+    await writeFile(join(cwd, "patch.blockpatch"), creationPatch("new line\n"));
 
     await applyPatchFile("patch.blockpatch", { cwd });
-    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nnew line\nomega\n");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("new line\n");
     expect(await fileExists(join(cwd, "dev"))).toBe(false);
   });
 });
