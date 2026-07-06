@@ -6,7 +6,7 @@ The core invariant is simple: a move transfers one exact, hash-verified payload 
 
 A move may also be one-sided. A source-only hunk removes the verified payload from an existing file. A target-only hunk materializes the patch-carried payload into an existing file. File path absence is represented separately with `/dev/null` in file headers: `/dev/null -> file` creates a file, and `file -> /dev/null` removes a file.
 
-`blockpatch` is intentionally closer to `patch --fuzz=0` than default GNU patch: context must match exactly, and line numbers are review hints rather than relocation authority.
+`blockpatch` emits reviewable unified-diff-shaped patches that are intended to be compatible with `patch --fuzz=0` where possible. `blockpatch apply` accepts a strict, hash-verified subset of those patches and deliberately rejects fuzzy, heuristic, or ambiguous application.
 
 ## Install
 
@@ -54,7 +54,7 @@ blockpatch move --src src/foo.ts --src-start $'\nfunction removeMe() {' --src-en
 
 Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths, `..` escapes, and operation paths containing symlink components are rejected. Existing regular files are also realpath-checked; if the real path escapes `--cwd`, the operation is rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
 
-`apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Because patch headers require `a/` and `b/` prefixes, the default is equivalent to `-p1`.
+`apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping because patch headers require `a/` and `b/` prefixes.
 
 `move` is the plug-and-play agent interface. JSON over stdin is the most reliable form because it avoids shell quoting problems:
 
@@ -96,7 +96,7 @@ blockpatch move \
   --expected-payload-sha256 <sha256>
 ```
 
-Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output. `--explain` is a dry-run JSON alias for `--dry-run --json-output`; it reuses the existing `moves` byte ranges and payload hash fields instead of introducing a separate planner.
+Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output. Before `move --diff` returns success, it parses and checks its own emitted patch against the current tree in memory. `--explain` is a dry-run JSON alias for `--dry-run --json-output`; it reuses the existing `moves` byte ranges and payload hash fields instead of introducing a separate planner.
 
 For agents, the canonical planning handshake is:
 
@@ -104,7 +104,7 @@ For agents, the canonical planning handshake is:
 blockpatch move --json - --diff --json-output
 ```
 
-That command validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, lists affected files, and returns the exact reviewable `.blockpatch` in the JSON `patch` field without mutating the working tree. A typical flow is: propose a move as JSON, let `blockpatch` validate and render the exact patch, show that patch to the user, then apply the `.blockpatch` in a second explicit step.
+That command validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. A typical flow is: propose a move as JSON, let `blockpatch` validate and render the exact patch, show that patch to the user, then apply the `.blockpatch` in a second explicit step.
 
 ## Move JSON
 
@@ -204,11 +204,12 @@ type BlockPatchJsonError = {
     anchor?: string
     matches?: number
     ranges?: Array<{ start: number; end: number }>
+    line_ranges?: Array<{ start: number; end: number }>
   }
 }
 ```
 
-Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges. They do not include source snippets, fuzzy suggestions, or repair guidance.
+Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. They do not include source snippets, fuzzy suggestions, or repair guidance.
 
 Error codes are the agent-facing branch contract. From `1.0.0` onward, removing a code or changing its meaning is semver-major.
 
@@ -393,7 +394,7 @@ Same-file moves use one file section. In that shape, the `--- a/<path>` and `+++
 
 Cross-file moves use two conventional file sections tied by the same move id and payload hash: one `role=source` section for the source file and one `role=target` section for the target file. Each section's `---` and `+++` headers name the same file. This avoids the misleading patch shape where `--- a/source.ts` and `+++ b/target.ts` look like a transformation from one filename into another.
 
-The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. By default, `blockpatch` strips one leading component from those raw paths, so `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
+The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping: `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
 
 ## Grammar
 

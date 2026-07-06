@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { TextDecoder } from "node:util";
-import { boundedRanges, fail } from "./errors";
+import { boundedLineRanges, boundedRanges, fail } from "./errors";
 import { readFileChecked } from "./files";
 import {
   buildMoveSelection,
+  checkPatchBytes,
   commitMove,
   findTargetSelection,
   indexesOf,
@@ -93,6 +94,7 @@ export async function moveBlock(
   const patch = options.diff
     ? renderMovePatch(normalized, srcOriginal, dstOriginal, selection, sameFile && samePatchLabel, payloadSha256)
     : undefined;
+  await selfCheckRenderedPatch(patch, cwd);
   const writeSuppressed = dryRun || options.diff === true;
 
   const changed = await commitMove({
@@ -265,6 +267,7 @@ async function insertPayload(
   const alreadyApplied = findAlreadyAppliedTarget(original, args, args.dst);
   if (alreadyApplied !== undefined) {
     const renderedPatch = options.diff ? renderInsertionPatch(args, original, alreadyApplied, payloadSha256) : undefined;
+    await selfCheckRenderedPatch(renderedPatch, cwd);
     return {
       changed: [],
       affected: [args.dst],
@@ -292,6 +295,7 @@ async function insertPayload(
     anchor: targetAnchorName(args)
   });
   const renderedPatch = options.diff ? renderInsertionPatch(args, original, target, payloadSha256) : undefined;
+  await selfCheckRenderedPatch(renderedPatch, cwd);
   const writeSuppressed = dryRun || options.diff === true;
   const next = Buffer.concat([
     original.subarray(0, target.insertIndex),
@@ -348,12 +352,14 @@ function findAlreadyAppliedTarget(
     return undefined;
   }
   if (matches.length > 1) {
+    const ranges = boundedRanges(matches.map((start) => ({ start, end: start + alreadyApplied.length })));
     fail("target_ambiguous", `Already-applied target is ambiguous in ${dstLabel}; matched ${matches.length} locations`, {
       path: dstLabel,
       phase: "target",
       anchor: "target_before+payload+target_after",
       matches: matches.length,
-      ranges: boundedRanges(matches.map((start) => ({ start, end: start + alreadyApplied.length })))
+      ranges,
+      line_ranges: boundedLineRanges(file, ranges)
     });
   }
 
@@ -379,6 +385,7 @@ async function deletePayload(
   verifyExpectedPayloadHash(validated, payloadSha256);
 
   const renderedPatch = options.diff ? renderDeletionPatch(args, original, source, payload, payloadSha256) : undefined;
+  await selfCheckRenderedPatch(renderedPatch, cwd);
   const writeSuppressed = dryRun || options.diff === true;
   const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
   const changed = next.equals(original) ? [] : [args.src];
@@ -435,7 +442,8 @@ function findSource(file: Buffer, args: NormalizedRelocationArgs | NormalizedDel
       phase: "source",
       anchor: "src_start/src_end",
       matches: ranges.length,
-      ranges: boundedRanges(ranges)
+      ranges: boundedRanges(ranges),
+      line_ranges: boundedLineRanges(file, ranges)
     });
   }
 
@@ -451,6 +459,13 @@ function targetAnchorName(args: NormalizedRelocationArgs | NormalizedInsertionAr
 
 function samePatchPath(left: string, right: string): boolean {
   return posix.normalize(left) === posix.normalize(right);
+}
+
+async function selfCheckRenderedPatch(patch: string | undefined, cwd: string): Promise<void> {
+  if (patch === undefined) {
+    return;
+  }
+  await checkPatchBytes(Buffer.from(patch, "utf8"), { cwd });
 }
 
 function renderMovePatch(

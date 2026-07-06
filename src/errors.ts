@@ -1,3 +1,5 @@
+import type { Buffer } from "node:buffer";
+
 export interface BlockPatchErrorRange {
   start: number;
   end: number;
@@ -38,6 +40,7 @@ export interface BlockPatchErrorDetails {
   anchor?: string;
   matches?: number;
   ranges?: BlockPatchErrorRange[];
+  line_ranges?: BlockPatchErrorRange[];
 }
 
 const maxErrorRanges = 10;
@@ -78,4 +81,51 @@ export function boundedRanges(matches: Iterable<BlockPatchErrorRange>): BlockPat
     ranges.push({ start: range.start, end: range.end });
   }
   return ranges;
+}
+
+export function boundedMatchLineRanges(
+  file: Buffer,
+  matches: Iterable<number>,
+  byteLength: number
+): BlockPatchErrorRange[] {
+  const lineRanges: BlockPatchErrorRange[] = [];
+  for (const start of matches) {
+    if (lineRanges.length >= maxErrorRanges) {
+      break;
+    }
+    lineRanges.push(byteRangeToLineRange(file, { start, end: start + byteLength }));
+  }
+  return lineRanges;
+}
+
+export function boundedLineRanges(
+  file: Buffer,
+  ranges: Iterable<BlockPatchErrorRange>
+): BlockPatchErrorRange[] {
+  return boundedRanges(ranges).map((range) => byteRangeToLineRange(file, range));
+}
+
+function byteRangeToLineRange(file: Buffer, range: BlockPatchErrorRange): BlockPatchErrorRange {
+  const start = clamp(range.start, 0, file.length);
+  const end = clamp(range.end, start, file.length);
+  const endByte = end > start ? end - 1 : start;
+  return {
+    start: lineNumberAt(file, start),
+    end: lineNumberAt(file, endByte)
+  };
+}
+
+function lineNumberAt(file: Buffer, byteIndex: number): number {
+  let line = 1;
+  const end = Math.min(byteIndex, file.length);
+  for (let index = 0; index < end; index += 1) {
+    if (file[index] === 0x0a) {
+      line += 1;
+    }
+  }
+  return line;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
 }

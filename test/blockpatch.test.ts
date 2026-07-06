@@ -4,7 +4,7 @@ import { chmod, link, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { applyPatchFile, checkPatchFile } from "../src/engine";
+import { applyPatchFile, checkPatchBytes, checkPatchFile } from "../src/engine";
 import { moveBlock } from "../src/move";
 import { BlockPatchError } from "../src/errors";
 
@@ -108,6 +108,10 @@ describe("blockpatch golden fixtures", () => {
       ranges: [
         { start: 0, end: sourceBlock.length },
         { start: secondStart, end: secondStart + sourceBlock.length }
+      ],
+      line_ranges: [
+        { start: 1, end: 3 },
+        { start: 5, end: 7 }
       ]
     });
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
@@ -1131,6 +1135,9 @@ describe("CLI", () => {
     expect(stdout.patch).toContain("blockpatch move id=move-1 payload-sha256=");
     expect(stdout.patch).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
     expect(stdout.patch).toContain("@@ -6,2 +3,5 @@ blockpatch-target id=move-1");
+    const selfCheck = await checkPatchBytes(Buffer.from(stdout.patch, "utf8"), { cwd });
+    expect(selfCheck.status).toBe("applied");
+    expect(selfCheck.written).toBe(false);
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
@@ -1703,6 +1710,7 @@ describe("CLI", () => {
         anchor: string;
         matches: number;
         ranges: Array<{ start: number; end: number }>;
+        line_ranges: Array<{ start: number; end: number }>;
       };
     };
     const firstTargetStart = source.indexOf(targetAnchor);
@@ -1723,6 +1731,9 @@ describe("CLI", () => {
       start: firstTargetStart + 9 * targetAnchor.length,
       end: firstTargetStart + 10 * targetAnchor.length
     });
+    expect(stderr.error.line_ranges).toHaveLength(10);
+    expect(stderr.error.line_ranges[0]).toEqual({ start: 3, end: 3 });
+    expect(stderr.error.line_ranges[9]).toEqual({ start: 12, end: 12 });
   });
 
   test("--unsafe-paths is not a supported escape hatch", async () => {

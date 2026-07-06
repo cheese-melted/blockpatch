@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { boundedMatchRanges, boundedRanges, fail } from "./errors";
+import { boundedLineRanges, boundedMatchLineRanges, boundedMatchRanges, boundedRanges, fail } from "./errors";
 import { assertRegularFile, failFileSystem, readFileChecked, statChecked } from "./files";
 import { devNull, parseBlockPatch } from "./parser";
 import { resolvePath, resolvePathAllowMissing, sameFileIdentity } from "./paths";
@@ -414,7 +414,8 @@ function findDeletionSourceRange(file: Buffer, patch: BlockPatch, srcLabel: stri
       phase: "source",
       anchor: "blockpatch-source",
       matches: fullMatches.length,
-      ranges: boundedMatchRanges(fullMatches, fullSource.length)
+      ranges: boundedMatchRanges(fullMatches, fullSource.length),
+      line_ranges: boundedMatchLineRanges(file, fullMatches, fullSource.length)
     });
   }
 
@@ -449,7 +450,8 @@ function deletionAlreadyAppliedOrFail(
       phase: "source",
       anchor: "blockpatch-source",
       matches: adjacentMatches.length,
-      ranges: boundedMatchRanges(adjacentMatches, adjacent.length)
+      ranges: boundedMatchRanges(adjacentMatches, adjacent.length),
+      line_ranges: boundedMatchLineRanges(file, adjacentMatches, adjacent.length)
     });
   }
 
@@ -467,7 +469,8 @@ function deletionAlreadyAppliedOrFail(
       phase: "source",
       anchor: "blockpatch-source",
       matches: envelopes.length,
-      ranges: boundedRanges(envelopes)
+      ranges: boundedRanges(envelopes),
+      line_ranges: boundedLineRanges(file, envelopes)
     });
   }
   fail("source_not_found", `Source anchors were not found in ${srcLabel}`, {
@@ -708,7 +711,8 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
       phase: "source",
       anchor: "blockpatch-source",
       matches: fullMatches.length,
-      ranges: boundedMatchRanges(fullMatches, fullSource.length)
+      ranges: boundedMatchRanges(fullMatches, fullSource.length),
+      line_ranges: boundedMatchLineRanges(srcFile, fullMatches, fullSource.length)
     });
   }
 
@@ -732,7 +736,8 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
       phase: "source",
       anchor: "blockpatch-source",
       matches: envelopes.length,
-      ranges: boundedRanges(envelopes)
+      ranges: boundedRanges(envelopes),
+      line_ranges: boundedLineRanges(srcFile, envelopes)
     });
   }
 
@@ -766,7 +771,8 @@ function findAlreadyAppliedTargetSelection(
         phase: "target",
         anchor: "blockpatch-target",
         matches: matches.length,
-        ranges: boundedMatchRanges(matches, alreadyApplied.length)
+        ranges: boundedMatchRanges(matches, alreadyApplied.length),
+        line_ranges: boundedMatchLineRanges(file, matches, alreadyApplied.length)
       }
     );
   }
@@ -817,7 +823,8 @@ export function findTargetSelection(
       path: dstLabel,
       ...details,
       matches: matches.length,
-      ranges: boundedMatchRanges(matches, anchor.length)
+      ranges: boundedMatchRanges(matches, anchor.length),
+      line_ranges: boundedMatchLineRanges(file, matches, anchor.length)
     });
   }
 
