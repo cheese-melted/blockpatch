@@ -35,6 +35,7 @@ try {
   await smokeCheckAndApply();
   await smokeGoldenFixtureApply();
   await smokeMoveDiffJson();
+  await smokePlanJson();
 } finally {
   await rm(smokeRoot, { recursive: true, force: true });
 }
@@ -100,6 +101,33 @@ async function smokeMoveDiffJson() {
   assert(result.patch.includes("@@ -6,2 +3,5 @@ blockpatch-target id=move-1"), "move patch must include target hunk");
   assertEqual(await readFile(join(cwd, "source.ts"), "utf8"), moveBefore, "move --diff must not modify files");
   console.log("ok: node dist/cli.js move --json - --diff --json-output");
+}
+
+async function smokePlanJson() {
+  const cwd = join(smokeRoot, "plan");
+  await mkdir(cwd);
+  await writeFile(join(cwd, "source.ts"), moveBefore);
+
+  const stdout = runCli(["plan", "--json", "-", "--cwd", cwd], {
+    input: JSON.stringify({
+      src: "source.ts",
+      src_start: "function movedThing() {\n",
+      src_end: "}\n",
+      target_before: "class Target {\n",
+      target_after: "}\n"
+    })
+  });
+  const result = JSON.parse(stdout);
+
+  assertEqual(result.ok, true, "plan JSON ok");
+  assertEqual(result.changed, ["source.ts"], "plan JSON changed");
+  assertEqual(result.written, false, "plan must not write");
+  assert(typeof result.patch === "string", "plan JSON must include a patch");
+  assert(result.patch.includes("diff --blockpatch a/source.ts b/source.ts"), "plan patch must include source.ts diff");
+  assert(result.patch.includes("@@ -1,5 +1,2 @@ blockpatch-source id=move-1"), "plan patch must include source hunk");
+  assert(result.patch.includes("@@ -6,2 +3,5 @@ blockpatch-target id=move-1"), "plan patch must include target hunk");
+  assertEqual(await readFile(join(cwd, "source.ts"), "utf8"), moveBefore, "plan must not modify files");
+  console.log("ok: node dist/cli.js plan --json -");
 }
 
 function runCli(args, options = {}) {

@@ -8,7 +8,7 @@ import { moveBlock } from "./move";
 import type { BlockPatchErrorCode } from "./errors";
 import type { ApplyResult, MoveBlockArgs, MoveBlockResult } from "./types";
 
-type Command = "apply" | "check" | "move" | "help" | "version";
+type Command = "apply" | "check" | "move" | "plan" | "help" | "version";
 
 const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
 
@@ -38,7 +38,7 @@ async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  if (options.command === "move") {
+  if (options.command === "move" || options.command === "plan") {
     const args = await loadMoveArgs(options);
     const result = await moveBlock(args, {
       cwd: options.cwd,
@@ -99,7 +99,7 @@ async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
   }
 
   if (options.moveJsonPath === undefined) {
-    throw new BlockPatchError("missing_move_args", "move requires --json or --src flags");
+    throw new BlockPatchError("missing_move_args", `${options.command} requires --json or --src flags`);
   }
 
   const jsonBytes =
@@ -134,12 +134,12 @@ function parseArgs(argv: string[]): CliOptions {
     return options;
   }
 
-  if (first !== "apply" && first !== "check" && first !== "move") {
+  if (first !== "apply" && first !== "check" && first !== "move" && first !== "plan") {
     throw new BlockPatchError("unknown_command", `Unknown command: ${first}`);
   }
 
-  if (first === "move") {
-    return parseMoveArgs(args, outputFlags.jsonOutput, outputFlags.explain);
+  if (first === "move" || first === "plan") {
+    return parseMoveArgs(first, args, first === "plan" ? true : outputFlags.jsonOutput, outputFlags.explain);
   }
 
   return parsePatchArgs(first, args, outputFlags.jsonOutput, outputFlags.explain);
@@ -207,8 +207,13 @@ function parsePatchArgs(
   return options;
 }
 
-function parseMoveArgs(args: string[], jsonOutput: boolean, explain: boolean): CliOptions {
-  const options = base("move", jsonOutput);
+function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boolean, explain: boolean): CliOptions {
+  const options = base(command, jsonOutput);
+  if (command === "plan") {
+    options.dryRun = true;
+    options.diff = true;
+    options.jsonOutput = true;
+  }
   if (explain) {
     options.dryRun = true;
   }
@@ -356,7 +361,7 @@ function takeOutputFlag(options: CliOptions, arg: string | undefined): boolean {
   }
   if (arg === "--explain") {
     options.jsonOutput = true;
-    if (options.command === "apply" || options.command === "move") {
+    if (options.command === "apply" || options.command === "move" || options.command === "plan") {
       options.dryRun = true;
     }
     return true;
@@ -434,6 +439,7 @@ function printHelp(): void {
 Usage:
   blockpatch check [patch.blockpatch|-] [-d <dir>] [-pN] [-R|--reverse] [--json-output|--explain]
   blockpatch apply [patch.blockpatch|-] [-i <patch.blockpatch>] [-d <dir>] [-pN] [-R|--reverse] [--dry-run] [--json-output|--explain]
+  blockpatch plan --json <path.json|-> [--cwd <dir>]
   blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--json-output|--explain]
   blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --target-before <text> --target-after <text> [--expected-payload-sha256 <sha256>]
   blockpatch move --src /dev/null --dst <path> --payload <text> --target-before <text>
@@ -473,6 +479,9 @@ function hasJsonOutputFlag(argv: string[]): boolean {
   }
   if (command === "move") {
     return hasMoveJsonOutputFlag(args);
+  }
+  if (command === "plan") {
+    return true;
   }
   return args.includes("--json-output") || args.includes("--explain");
 }

@@ -15,6 +15,7 @@ The npm examples use the published package. Check `npm view blockpatch version` 
 ```sh
 npx blockpatch check patch.blockpatch
 npx blockpatch apply patch.blockpatch
+npx blockpatch plan --json -
 npx blockpatch move --json -
 bunx blockpatch apply patch.blockpatch --dry-run
 npm install -g blockpatch
@@ -43,6 +44,7 @@ blockpatch apply < patch.blockpatch
 blockpatch apply -i patch.blockpatch
 blockpatch apply -d repo-root -p1 patch.blockpatch
 blockpatch check -p1 < patch.blockpatch
+blockpatch plan --json -
 blockpatch move --json -
 blockpatch move --json move.json
 blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-end $'\n}\n' --target-before $'class Target {\n'
@@ -96,15 +98,15 @@ blockpatch move \
   --expected-payload-sha256 <sha256>
 ```
 
-Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output. Before `move --diff` returns success, it parses and checks its own emitted patch against the current tree in memory. `--explain` is a dry-run JSON alias for `--dry-run --json-output`; it reuses the existing `moves` byte ranges and payload hash fields instead of introducing a separate planner.
+Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output. Before `move --diff` returns success, it parses and checks its own emitted patch against the current tree in memory. `--explain` is a dry-run JSON alias for `--dry-run --json-output`; it reuses the existing `moves` byte ranges and payload hash fields.
 
 For agents, the canonical planning handshake is:
 
 ```sh
-blockpatch move --json - --diff --json-output
+blockpatch plan --json -
 ```
 
-That command validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree.
+That command is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. The explicit `move --json - --diff --json-output` form remains supported.
 
 `move --json --diff` is a planner for the current tree. For relocation and deletion, the JSON request selects the payload from the current source file; if that source block is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion JSON is the exception because it includes `payload` directly.
 

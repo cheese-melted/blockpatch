@@ -1194,6 +1194,77 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
+  test("plan --json returns a reviewable patch without writing", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "plan", "--json", "-", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n",
+        target_after: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      written: boolean;
+      patch: string;
+    };
+    expect(stdout.ok).toBe(true);
+    expect(stdout.changed).toEqual(["source.ts"]);
+    expect(stdout.written).toBe(false);
+    expect(stdout.patch).toContain("diff --blockpatch a/source.ts b/source.ts");
+    expect(stdout.patch).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
+    expect(stdout.patch).toContain("@@ -6,2 +3,5 @@ blockpatch-target id=move-1");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
+  test("plan errors are JSON by default", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "plan", "--json", "-", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      ok: boolean;
+      error: { code: string; field: string };
+    };
+    expect(stderr).toMatchObject({
+      ok: false,
+      error: {
+        code: "invalid_move_args",
+        field: "target_before"
+      }
+    });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
   test("move --json accepts expected_payload_sha256", async () => {
     const cwd = await moveFixture();
     const proc = Bun.spawn({
