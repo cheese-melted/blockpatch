@@ -59,6 +59,17 @@ interface StagedAtomicWrite {
   temp: string;
 }
 
+export interface InMemoryPatchFile {
+  path: string;
+  bytes: Buffer;
+  identity?: string;
+}
+
+interface InMemoryFileState {
+  bytes: Buffer;
+  identity: string;
+}
+
 export async function checkPatchFile(
   patchPath: string,
   options: ApplyOptions = {}
@@ -71,6 +82,15 @@ export async function checkPatchBytes(
   options: ApplyOptions = {}
 ): Promise<ApplyResult> {
   return runPatchBytes(patchBytes, { ...options, dryRun: true });
+}
+
+export function checkPatchBytesInMemory(
+  patchBytes: Buffer,
+  files: readonly InMemoryPatchFile[],
+  options: Pick<ApplyOptions, "reverse" | "stripComponents"> = {}
+): ApplyResult {
+  const patch = parseBlockPatch(patchBytes, { stripComponents: options.stripComponents });
+  return checkMovePatchInMemory(patch, memoryFileMap(files), options.reverse ?? false);
 }
 
 export async function applyPatchFile(
@@ -175,6 +195,70 @@ async function applyMovePatch(
   };
 }
 
+function checkMovePatchInMemory(
+  patch: BlockPatch,
+  files: Map<string, InMemoryFileState>,
+  reverse: boolean
+): ApplyResult {
+  const effectivePatch = reverse ? reverseMovePatch(patch) : patch;
+  if (effectivePatch.src === null || effectivePatch.dst === null) {
+    if (effectivePatch.src === null && effectivePatch.dst !== null && !effectivePatch.hasSourceHunk) {
+      return checkPathCreationMoveInMemory(effectivePatch, effectivePatch.dst, files);
+    }
+    if (effectivePatch.dst === null && effectivePatch.src !== null && effectivePatch.hasSourceHunk) {
+      return checkPathDeletionMoveInMemory(effectivePatch, effectivePatch.src, files);
+    }
+    fail("parse_error", "Invalid /dev/null endpoint move shape");
+  }
+
+  if (!effectivePatch.hasSourceHunk) {
+    return checkInFileInsertionMoveInMemory(effectivePatch, effectivePatch.src, effectivePatch.dst, files);
+  }
+
+  if (effectivePatch.target === null) {
+    return checkInFileDeletionMoveInMemory(effectivePatch, effectivePatch.src, effectivePatch.dst, files);
+  }
+
+  const srcLabel = effectivePatch.src;
+  const dstLabel = effectivePatch.dst;
+  const srcFile = readMemoryFile(files, srcLabel, "source file");
+  const sameFile = sameMemoryFile(files, srcLabel, dstLabel);
+  const dstFile = sameFile ? srcFile : readMemoryFile(files, dstLabel, "destination file");
+  const plan = selectMovePlan(srcFile, dstFile, effectivePatch, sameFile);
+
+  if (plan.status === "already_applied") {
+    return {
+      changed: [],
+      affected: unique([srcLabel, dstLabel]),
+      written: false,
+      noop: true,
+      status: "already_applied",
+      moves: [plan.details]
+    };
+  }
+
+  const selection = plan.selection;
+  const next = sameFile ? applyMove(srcFile, selection) : applyCrossFileMove(srcFile, dstFile, selection);
+  const changed = changedMoveLabels(srcLabel, dstLabel, sameFile, srcFile, dstFile, next);
+
+  return {
+    changed,
+    affected: unique([srcLabel, dstLabel]),
+    written: false,
+    noop: changed.length === 0,
+    status: changed.length === 0 ? "noop" : "applied",
+    moves: [
+      moveResultDetails({
+        id: effectivePatch.id,
+        src: srcLabel,
+        dst: dstLabel,
+        payloadSha256: effectivePatch.payloadSha256,
+        selection
+      })
+    ]
+  };
+}
+
 function reverseMovePatch(patch: BlockPatch): BlockPatch {
   const reversedTarget = patch.hasSourceHunk
     ? {
@@ -247,6 +331,52 @@ async function applyInFileInsertionMove(
   });
 }
 
+function checkInFileInsertionMoveInMemory(
+  patch: BlockPatch,
+  srcLabel: string,
+  dstLabel: string,
+  files: Map<string, InMemoryFileState>
+): ApplyResult {
+  const target = requireTarget(patch);
+  const original = readMemoryFile(files, dstLabel, "destination file");
+  const alreadyApplied = findAlreadyAppliedTargetSelection(original, patch, dstLabel);
+  if (alreadyApplied !== undefined) {
+    return oneSidedResult({
+      patch,
+      src: srcLabel,
+      dst: dstLabel,
+      changed: [],
+      dryRun: true,
+      status: "already_applied",
+      sourceRange: null,
+      targetRange: alreadyApplied.range,
+      insertIndex: alreadyApplied.insertIndex
+    });
+  }
+
+  const selection = findTargetSelection(original, target.before, target.after, dstLabel, {
+    phase: "target",
+    anchor: "blockpatch-target"
+  });
+  const next = Buffer.concat([
+    original.subarray(0, selection.insertIndex),
+    patch.sourcePayload,
+    original.subarray(selection.insertIndex)
+  ]);
+
+  return oneSidedResult({
+    patch,
+    src: srcLabel,
+    dst: dstLabel,
+    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
+    dryRun: true,
+    status: next.equals(original) ? "noop" : "applied",
+    sourceRange: null,
+    targetRange: selection.range,
+    insertIndex: selection.insertIndex
+  });
+}
+
 async function applyInFileDeletionMove(
   patch: BlockPatch,
   srcLabel: string,
@@ -290,6 +420,43 @@ async function applyInFileDeletionMove(
   });
 }
 
+function checkInFileDeletionMoveInMemory(
+  patch: BlockPatch,
+  srcLabel: string,
+  dstLabel: string,
+  files: Map<string, InMemoryFileState>
+): ApplyResult {
+  const original = readMemoryFile(files, srcLabel, "source file");
+  const source = findDeletionSourceRange(original, patch, srcLabel);
+
+  if (source === undefined) {
+    return oneSidedResult({
+      patch,
+      src: srcLabel,
+      dst: dstLabel,
+      changed: [],
+      dryRun: true,
+      status: "already_applied",
+      sourceRange: null,
+      targetRange: null,
+      insertIndex: null
+    });
+  }
+
+  const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
+  return oneSidedResult({
+    patch,
+    src: srcLabel,
+    dst: dstLabel,
+    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
+    dryRun: true,
+    status: next.equals(original) ? "noop" : "applied",
+    sourceRange: source,
+    targetRange: null,
+    insertIndex: null
+  });
+}
+
 function oneSidedResult(args: {
   patch: BlockPatch;
   src: string;
@@ -322,6 +489,28 @@ function oneSidedResult(args: {
   };
 }
 
+function checkPathCreationMoveInMemory(
+  patch: BlockPatch,
+  dstLabel: string,
+  files: Map<string, InMemoryFileState>
+): ApplyResult {
+  const fullTarget = fullTargetBytes(patch);
+  const original = files.get(dstLabel)?.bytes;
+
+  if (original !== undefined) {
+    if (original.equals(fullTarget)) {
+      return nullSourceResult(patch, dstLabel, true, "already_applied", { start: 0, end: original.length }, 0);
+    }
+    fail("destination_exists", `Destination path for file creation already exists with different bytes: ${dstLabel}`, {
+      path: dstLabel,
+      phase: "target",
+      anchor: "blockpatch-target"
+    });
+  }
+
+  return nullSourceResult(patch, dstLabel, true, "applied", { start: 0, end: 0 }, 0);
+}
+
 // /dev/null -> file: create the file path with the patch-carried whole-file payload.
 async function applyPathCreationMove(
   patch: BlockPatch,
@@ -337,7 +526,7 @@ async function applyPathCreationMove(
     if (original.equals(fullTarget)) {
       return nullSourceResult(patch, dstLabel, dryRun, "already_applied", { start: 0, end: original.length }, 0);
     }
-    fail("target_not_found", `Destination path for file creation already exists: ${dstLabel}`, {
+    fail("destination_exists", `Destination path for file creation already exists with different bytes: ${dstLabel}`, {
       path: dstLabel,
       phase: "target",
       anchor: "blockpatch-target"
@@ -348,6 +537,32 @@ async function applyPathCreationMove(
     await writeAtomically([{ path: resolved.path, bytes: fullTarget, create: true }]);
   }
   return nullSourceResult(patch, dstLabel, dryRun, "applied", { start: 0, end: 0 }, 0);
+}
+
+function checkPathDeletionMoveInMemory(
+  patch: BlockPatch,
+  srcLabel: string,
+  files: Map<string, InMemoryFileState>
+): ApplyResult {
+  const original = files.get(srcLabel)?.bytes;
+  if (original === undefined) {
+    return nullTargetResult(patch, srcLabel, true, "already_applied", null);
+  }
+
+  const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
+  if (!original.equals(fullSource)) {
+    fail("source_not_found", `Whole-file source payload was not found in ${srcLabel}`, {
+      path: srcLabel,
+      phase: "source",
+      anchor: "blockpatch-source",
+      matches: 0
+    });
+  }
+
+  return nullTargetResult(patch, srcLabel, true, "applied", {
+    start: patch.sourceBefore.length,
+    end: patch.sourceBefore.length + patch.sourcePayload.length
+  });
 }
 
 // file -> /dev/null: verify the whole-file payload, then remove the path.
@@ -429,14 +644,7 @@ function deletionAlreadyAppliedOrFail(
 ): ByteRange | undefined {
   const anchorless = patch.sourceBefore.length === 0 && patch.sourceAfter.length === 0;
   if (anchorless) {
-    if (indexesOf(file, patch.sourcePayload).length === 0) {
-      return undefined;
-    }
-    fail("source_ambiguous", `Source payload is ambiguous in ${srcLabel}`, {
-      path: srcLabel,
-      phase: "source",
-      anchor: "blockpatch-source"
-    });
+    return undefined;
   }
 
   const adjacent = Buffer.concat([patch.sourceBefore, patch.sourceAfter]);
@@ -538,29 +746,6 @@ function nullTargetResult(
       }
     ]
   };
-}
-
-export function selectMove(
-  srcFile: Buffer,
-  dstFile: Buffer,
-  patch: BlockPatch,
-  sameFile: boolean
-): MoveSelection {
-  const dstLabel = patch.dst ?? devNull;
-  const targetAnchor = requireTarget(patch);
-  const source = findSourceRange(srcFile, dstFile, patch);
-  if (source === undefined) {
-    fail("already_applied", `Patch is already applied in ${dstLabel}`, {
-      path: dstLabel,
-      phase: "target",
-      anchor: "blockpatch-target"
-    });
-  }
-  const target = findTargetSelection(dstFile, targetAnchor.before, targetAnchor.after, dstLabel, {
-    phase: "target",
-    anchor: "blockpatch-target"
-  });
-  return buildMoveSelection(srcFile, source, target, sameFile, dstLabel);
 }
 
 function selectMovePlan(
@@ -897,6 +1082,62 @@ export function unique(paths: string[]): string[] {
   return [...new Set(paths)];
 }
 
+function changedMoveLabels(
+  srcLabel: string,
+  dstLabel: string,
+  sameFile: boolean,
+  srcOriginal: Buffer,
+  dstOriginal: Buffer,
+  next: { src: Buffer; dst: Buffer }
+): string[] {
+  const srcChanged = !next.src.equals(srcOriginal);
+  const dstChanged = !sameFile && !next.dst.equals(dstOriginal);
+  const sameFileAlias = sameFile && srcLabel !== dstLabel;
+  const changed: string[] = [];
+
+  if (srcChanged) {
+    changed.push(srcLabel);
+    if (sameFileAlias) {
+      changed.push(dstLabel);
+    }
+  }
+  if (dstChanged) {
+    changed.push(dstLabel);
+  }
+  return unique(changed);
+}
+
+function memoryFileMap(files: readonly InMemoryPatchFile[]): Map<string, InMemoryFileState> {
+  const mapped = new Map<string, InMemoryFileState>();
+  for (const file of files) {
+    if (mapped.has(file.path)) {
+      fail("parse_error", `Duplicate in-memory file: ${file.path}`, { path: file.path, phase: "check" });
+    }
+    mapped.set(file.path, {
+      bytes: file.bytes,
+      identity: file.identity ?? file.path
+    });
+  }
+  return mapped;
+}
+
+function readMemoryFile(files: Map<string, InMemoryFileState>, path: string, label: string): Buffer {
+  const file = files.get(path);
+  if (file === undefined) {
+    fail("file_not_found", `Could not read ${label}: ${path}`, { path, phase: "io" });
+  }
+  return file.bytes;
+}
+
+function sameMemoryFile(files: Map<string, InMemoryFileState>, left: string, right: string): boolean {
+  if (left === right) {
+    return true;
+  }
+  const leftFile = files.get(left);
+  const rightFile = files.get(right);
+  return leftFile !== undefined && rightFile !== undefined && leftFile.identity === rightFile.identity;
+}
+
 export async function writeAtomic(path: string, bytes: Buffer): Promise<void> {
   await writeAtomically([{ path, bytes }]);
 }
@@ -923,11 +1164,16 @@ async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
 
 async function stageAtomicWrite(path: string, bytes: Buffer, create = false): Promise<StagedAtomicWrite> {
   let mode: number | undefined;
+  let createMissing = false;
   if (create) {
     const info = await statOptional(path);
     if (info !== undefined) {
       assertRegularFile(info, path, "output file");
       mode = info.mode;
+    }
+    if (mode === undefined) {
+      createMissing = true;
+      mode = 0o644;
     }
   } else {
     const info = await statChecked(path, "output file");
@@ -940,7 +1186,7 @@ async function stageAtomicWrite(path: string, bytes: Buffer, create = false): Pr
   const temp = join(dir, `.${base}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
 
   try {
-    if (create && mode === undefined) {
+    if (createMissing) {
       await mkdir(dir, { recursive: true });
     }
     await writeFile(temp, bytes, { flag: "wx" });

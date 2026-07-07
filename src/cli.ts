@@ -117,16 +117,21 @@ async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
 
 function parseArgs(argv: string[]): CliOptions {
   const args = [...argv];
-  const explain = takeFlag(args, "--explain");
-  const jsonOutput = takeFlag(args, "--json-output") || explain;
+  const outputFlags = takeLeadingOutputFlags(args);
   const first = args.shift();
 
   if (first === undefined || first === "help" || first === "--help" || first === "-h") {
-    return base("help", jsonOutput);
+    return base("help", outputFlags.jsonOutput);
   }
 
   if (first === "version" || first === "--version" || first === "-v") {
-    return base("version", jsonOutput);
+    const options = base("version", outputFlags.jsonOutput);
+    for (const arg of args) {
+      if (arg === "--json-output" || arg === "--explain") {
+        options.jsonOutput = true;
+      }
+    }
+    return options;
   }
 
   if (first !== "apply" && first !== "check" && first !== "move") {
@@ -134,10 +139,10 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   if (first === "move") {
-    return parseMoveArgs(args, jsonOutput, explain);
+    return parseMoveArgs(args, outputFlags.jsonOutput, outputFlags.explain);
   }
 
-  return parsePatchArgs(first, args, jsonOutput, explain);
+  return parsePatchArgs(first, args, outputFlags.jsonOutput, outputFlags.explain);
 }
 
 function parsePatchArgs(
@@ -153,6 +158,9 @@ function parsePatchArgs(
 
   while (args.length > 0) {
     const arg = args.shift();
+    if (takeOutputFlag(options, arg)) {
+      continue;
+    }
     if (arg === "--dry-run") {
       options.dryRun = true;
       continue;
@@ -209,6 +217,9 @@ function parseMoveArgs(args: string[], jsonOutput: boolean, explain: boolean): C
 
   while (args.length > 0) {
     const arg = args.shift();
+    if (takeOutputFlag(options, arg)) {
+      continue;
+    }
     if (arg === "--dry-run") {
       options.dryRun = true;
       continue;
@@ -325,13 +336,32 @@ function parseStripComponents(value: string, option: string): number {
   return parsed;
 }
 
-function takeFlag(args: string[], flag: string): boolean {
-  const index = args.indexOf(flag);
-  if (index === -1) {
-    return false;
+function takeLeadingOutputFlags(args: string[]): { jsonOutput: boolean; explain: boolean } {
+  let jsonOutput = false;
+  let explain = false;
+
+  while (args[0] === "--json-output" || args[0] === "--explain") {
+    const arg = args.shift();
+    jsonOutput = true;
+    explain = explain || arg === "--explain";
   }
-  args.splice(index, 1);
-  return true;
+
+  return { jsonOutput, explain };
+}
+
+function takeOutputFlag(options: CliOptions, arg: string | undefined): boolean {
+  if (arg === "--json-output") {
+    options.jsonOutput = true;
+    return true;
+  }
+  if (arg === "--explain") {
+    options.jsonOutput = true;
+    if (options.command === "apply" || options.command === "move") {
+      options.dryRun = true;
+    }
+    return true;
+  }
+  return false;
 }
 
 function requireValue(args: string[], option: string, pathValue: boolean): string {
@@ -373,7 +403,7 @@ function writeChangeResult(
 
 function writeSuccess(options: CliOptions, result: unknown, plainText?: string): void {
   if (options.jsonOutput) {
-    console.log(JSON.stringify({ ok: true, ...objectResult(result) }));
+    console.log(JSON.stringify({ ok: true, ...objectResult(result), ...jsonSuccessMetadata(options) }));
     return;
   }
 
@@ -389,6 +419,13 @@ function writeSuccess(options: CliOptions, result: unknown, plainText?: string):
 
 function objectResult(result: unknown): Record<string, unknown> {
   return typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+}
+
+function jsonSuccessMetadata(options: CliOptions): Record<string, unknown> {
+  if (options.command === "apply" || options.command === "check") {
+    return { strip_components: options.stripComponents };
+  }
+  return {};
 }
 
 function printHelp(): void {
@@ -410,7 +447,7 @@ main(process.argv.slice(2)).then(
     process.exitCode = code;
   },
   (error: unknown) => {
-    const jsonOutput = process.argv.includes("--json-output") || process.argv.includes("--explain");
+    const jsonOutput = hasJsonOutputFlag(process.argv.slice(2));
     if (error instanceof BlockPatchError) {
       writeError(error.code, error.message, jsonOutput, error.details);
       process.exitCode = 1;
@@ -422,6 +459,53 @@ main(process.argv.slice(2)).then(
     process.exitCode = 1;
   }
 );
+
+function hasJsonOutputFlag(argv: string[]): boolean {
+  const args = [...argv];
+  const outputFlags = takeLeadingOutputFlags(args);
+  if (outputFlags.jsonOutput) {
+    return true;
+  }
+
+  const command = args.shift();
+  if (command === "apply" || command === "check") {
+    return hasPatchJsonOutputFlag(args);
+  }
+  if (command === "move") {
+    return hasMoveJsonOutputFlag(args);
+  }
+  return args.includes("--json-output") || args.includes("--explain");
+}
+
+function hasPatchJsonOutputFlag(args: string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--json-output" || arg === "--explain") {
+      return true;
+    }
+    if (arg === "--cwd" || arg === "--directory" || arg === "-d" || arg === "-i" || arg === "--input") {
+      index += 1;
+      continue;
+    }
+    if (arg === "-p" || arg === "--strip") {
+      index += 1;
+    }
+  }
+  return false;
+}
+
+function hasMoveJsonOutputFlag(args: string[]): boolean {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--json-output" || arg === "--explain") {
+      return true;
+    }
+    if (arg === "--cwd" || arg === "--directory" || arg === "-d" || arg === "--json" || argToMoveKey(arg) !== undefined) {
+      index += 1;
+    }
+  }
+  return false;
+}
 
 function writeError(
   code: BlockPatchErrorCode,

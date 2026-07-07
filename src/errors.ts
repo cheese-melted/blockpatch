@@ -18,6 +18,7 @@ export type BlockPatchErrorCode =
   | "source_ambiguous"
   | "target_not_found"
   | "target_ambiguous"
+  | "destination_exists"
   | "payload_mismatch"
   | "hash_mismatch"
   | "invalid_utf8"

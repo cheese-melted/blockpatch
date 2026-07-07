@@ -5,7 +5,7 @@ import { boundedLineRanges, boundedRanges, fail } from "./errors";
 import { readFileChecked } from "./files";
 import {
   buildMoveSelection,
-  checkPatchBytes,
+  checkPatchBytesInMemory,
   commitMove,
   findTargetSelection,
   indexesOf,
@@ -13,6 +13,7 @@ import {
   unique,
   writeAtomic,
   type ByteRange,
+  type InMemoryPatchFile,
   type TargetSelection,
   type MoveSelection
 } from "./engine";
@@ -94,7 +95,10 @@ export async function moveBlock(
   const patch = options.diff
     ? renderMovePatch(normalized, srcOriginal, dstOriginal, selection, sameFile && samePatchLabel, payloadSha256)
     : undefined;
-  await selfCheckRenderedPatch(patch, cwd);
+  await selfCheckRenderedPatch(
+    patch,
+    pairedSelfCheckFiles(normalized.src, normalized.dst, srcOriginal, dstOriginal, sameFile)
+  );
   const writeSuppressed = dryRun || options.diff === true;
 
   const changed = await commitMove({
@@ -267,7 +271,7 @@ async function insertPayload(
   const alreadyApplied = findAlreadyAppliedTarget(original, args, args.dst);
   if (alreadyApplied !== undefined) {
     const renderedPatch = options.diff ? renderInsertionPatch(args, original, alreadyApplied, payloadSha256) : undefined;
-    await selfCheckRenderedPatch(renderedPatch, cwd);
+    await selfCheckRenderedPatch(renderedPatch, [{ path: args.dst, bytes: original }]);
     return {
       changed: [],
       affected: [args.dst],
@@ -295,7 +299,7 @@ async function insertPayload(
     anchor: targetAnchorName(args)
   });
   const renderedPatch = options.diff ? renderInsertionPatch(args, original, target, payloadSha256) : undefined;
-  await selfCheckRenderedPatch(renderedPatch, cwd);
+  await selfCheckRenderedPatch(renderedPatch, [{ path: args.dst, bytes: original }]);
   const writeSuppressed = dryRun || options.diff === true;
   const next = Buffer.concat([
     original.subarray(0, target.insertIndex),
@@ -385,7 +389,7 @@ async function deletePayload(
   verifyExpectedPayloadHash(validated, payloadSha256);
 
   const renderedPatch = options.diff ? renderDeletionPatch(args, original, source, payload, payloadSha256) : undefined;
-  await selfCheckRenderedPatch(renderedPatch, cwd);
+  await selfCheckRenderedPatch(renderedPatch, [{ path: args.src, bytes: original }]);
   const writeSuppressed = dryRun || options.diff === true;
   const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
   const changed = next.equals(original) ? [] : [args.src];
@@ -461,11 +465,29 @@ function samePatchPath(left: string, right: string): boolean {
   return posix.normalize(left) === posix.normalize(right);
 }
 
-async function selfCheckRenderedPatch(patch: string | undefined, cwd: string): Promise<void> {
+async function selfCheckRenderedPatch(
+  patch: string | undefined,
+  files: readonly InMemoryPatchFile[]
+): Promise<void> {
   if (patch === undefined) {
     return;
   }
-  await checkPatchBytes(Buffer.from(patch, "utf8"), { cwd });
+  checkPatchBytesInMemory(Buffer.from(patch, "utf8"), files);
+}
+
+function pairedSelfCheckFiles(
+  srcLabel: string,
+  dstLabel: string,
+  srcOriginal: Buffer,
+  dstOriginal: Buffer,
+  sameFile: boolean
+): InMemoryPatchFile[] {
+  const identity = sameFile ? "move-file" : undefined;
+  const files: InMemoryPatchFile[] = [{ path: srcLabel, bytes: srcOriginal, identity }];
+  if (dstLabel !== srcLabel) {
+    files.push({ path: dstLabel, bytes: dstOriginal, identity });
+  }
+  return files;
 }
 
 function renderMovePatch(

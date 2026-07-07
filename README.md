@@ -104,7 +104,11 @@ For agents, the canonical planning handshake is:
 blockpatch move --json - --diff --json-output
 ```
 
-That command validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. A typical flow is: propose a move as JSON, let `blockpatch` validate and render the exact patch, show that patch to the user, then apply the `.blockpatch` in a second explicit step.
+That command validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree.
+
+`move --json --diff` is a planner for the current tree. For relocation and deletion, the JSON request selects the payload from the current source file; if that source block is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion JSON is the exception because it includes `payload` directly.
+
+A typical flow is: propose a move as JSON, let `blockpatch` validate and render the exact patch, show that patch to the user, then apply the `.blockpatch` in a second explicit step. Retry the `.blockpatch`, not the source-selected JSON plan.
 
 ## Move JSON
 
@@ -174,6 +178,7 @@ type ApplyResult = {
   written: boolean
   noop: boolean
   status: "applied" | "noop" | "already_applied"
+  strip_components?: number
   patch?: string
   moves: Array<{
     id: string
@@ -188,7 +193,7 @@ type ApplyResult = {
 }
 ```
 
-`changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the requested final state is already present. `patch` is present when `move --diff --json-output` is used. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
+`changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the command can prove the requested final state is already present. `strip_components` is present for `check` and `apply` JSON success output and reports the effective `-p` path-stripping count; it defaults to `1`. `.blockpatch` apply/check can prove retry idempotence because the patch carries the payload; source-selected `move --json` relocation/deletion requests generally cannot after the source block is gone. `patch` is present when `move --diff --json-output` is used. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
 
 Errors print:
 
@@ -227,6 +232,7 @@ type BlockPatchErrorCode =
   | "source_ambiguous"
   | "target_not_found"
   | "target_ambiguous"
+  | "destination_exists"
   | "payload_mismatch"
   | "hash_mismatch"
   | "invalid_utf8"

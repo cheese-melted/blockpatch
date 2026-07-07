@@ -410,7 +410,8 @@ function parseHunks(lines: PatchLine[], start: number, end: number): Hunk[] {
 
       let content = Buffer.concat([body.subarray(1), lines[index].eol]);
       if (index + 1 < lines.length && text(lines[index + 1]) === noNewlineMarker) {
-        content = Buffer.from(body.subarray(1));
+        const bareCr = lines[index].eol[0] === 0x0d ? lines[index].eol.subarray(0, 1) : Buffer.alloc(0);
+        content = Buffer.concat([body.subarray(1), bareCr]);
         index += 1;
       }
 
@@ -600,7 +601,7 @@ function splitLines(input: Buffer): PatchLine[] {
   while (position < input.length) {
     const lf = input.indexOf(0x0a, position);
     const lineEnd = lf === -1 ? input.length : lf;
-    const hasCr = lineEnd > position && input[lineEnd - 1] === 0x0d;
+    const hasCr = lf !== -1 && lineEnd > position && input[lineEnd - 1] === 0x0d;
     const bodyEnd = hasCr ? lineEnd - 1 : lineEnd;
     const eol =
       lf === -1
