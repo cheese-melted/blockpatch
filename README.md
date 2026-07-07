@@ -10,8 +10,6 @@ A move may also be one-sided. A source-only hunk removes the verified payload fr
 
 ## Install
 
-The npm examples use the published package. Check `npm view blockpatch version` before relying on `npx blockpatch` for semantics that may only exist in this checkout.
-
 ```sh
 npx blockpatch check patch.blockpatch
 npx blockpatch apply patch.blockpatch
@@ -218,7 +216,7 @@ type BlockPatchJsonError = {
 
 Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. They do not include source snippets, fuzzy suggestions, or repair guidance.
 
-Error codes are the agent-facing branch contract. From `1.0.0` onward, removing a code or changing its meaning is semver-major.
+Error codes are the agent-facing branch contract. Removing a code or changing its meaning is semver-major.
 
 ```ts
 type BlockPatchErrorCode =
