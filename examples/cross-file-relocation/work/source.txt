@@ -1,0 +1,5 @@
+alpha()
+function movedThing() {
+  return 42;
+}
+omega()

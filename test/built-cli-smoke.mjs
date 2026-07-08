@@ -46,12 +46,13 @@ async function smokeCheckAndApply() {
   await writeFile(join(cwd, "file.txt"), patchBefore);
   await writeFile(join(cwd, "patch.blockpatch"), relocationPatch);
 
-  const checkStdout = runCli(["check", "patch.blockpatch", "--cwd", cwd]);
+  const patchPath = join(cwd, "patch.blockpatch");
+  const checkStdout = runCli(["check", patchPath, "--cwd", cwd]);
   assertEqual(checkStdout, "would change file.txt\n", "check stdout");
   assertEqual(await readFile(join(cwd, "file.txt"), "utf8"), patchBefore, "check must not modify files");
   console.log("ok: node dist/cli.js check");
 
-  const applyStdout = runCli(["apply", "patch.blockpatch", "--cwd", cwd]);
+  const applyStdout = runCli(["apply", patchPath, "--cwd", cwd]);
   assertEqual(applyStdout, "changed file.txt\n", "apply stdout");
   assertEqual(await readFile(join(cwd, "file.txt"), "utf8"), patchAfter, "apply must move the block");
   console.log("ok: node dist/cli.js apply");
@@ -65,7 +66,7 @@ async function smokeGoldenFixtureApply() {
     await writeFile(join(cwd, "file.txt"), await readFile(join(fixtureDir, "before.txt")));
     await writeFile(join(cwd, "patch.blockpatch"), await readFile(join(fixtureDir, "patch.blockpatch")));
 
-    const stdout = runCli(["apply", "patch.blockpatch", "--cwd", cwd]);
+    const stdout = runCli(["apply", join(cwd, "patch.blockpatch"), "--cwd", cwd]);
     assertEqual(stdout, "changed file.txt\n", `${fixtureName} apply stdout`);
     assertEqual(
       await readFile(join(cwd, "file.txt"), "utf8"),

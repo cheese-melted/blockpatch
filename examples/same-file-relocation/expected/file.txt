@@ -1,0 +1,4 @@
+alpha
+omega
+target
+move me

@@ -1,0 +1,8 @@
+diff --blockpatch /dev/null b/file.txt
+blockpatch version 1
+blockpatch move id=move-1 payload-sha256=072a398e62ad50e40613b98e57f3e3236a471dcbd7c2b9f190440c22adc16a0f
+--- /dev/null
++++ b/file.txt
+
+@@ -0,0 +1,1 @@ blockpatch-target id=move-1
++created file

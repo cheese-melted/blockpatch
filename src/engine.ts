@@ -648,7 +648,9 @@ function deletionAlreadyAppliedOrFail(
   }
 
   const adjacent = Buffer.concat([patch.sourceBefore, patch.sourceAfter]);
-  const adjacentMatches = indexesOf(file, adjacent);
+  const adjacentMatches = indexesOf(file, adjacent).filter((start) =>
+    isDeletionAlreadyAppliedMatch(file, patch, start)
+  );
   if (adjacentMatches.length === 1) {
     return undefined;
   }
@@ -687,6 +689,16 @@ function deletionAlreadyAppliedOrFail(
     anchor: "blockpatch-source",
     matches: 0
   });
+}
+
+function isDeletionAlreadyAppliedMatch(file: Buffer, patch: BlockPatch, start: number): boolean {
+  if (patch.sourceBefore.length === 0) {
+    return start === 0;
+  }
+  if (patch.sourceAfter.length === 0) {
+    return start + patch.sourceBefore.length === file.length;
+  }
+  return true;
 }
 
 function nullSourceResult(

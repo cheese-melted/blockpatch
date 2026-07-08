@@ -25,6 +25,8 @@
   },
   "files": [
     "dist",
+    "docs",
+    "examples",
     "README.md",
     "CONTRIBUTING.md",
     "LICENSE"
@@ -34,7 +36,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && bun build ./src/cli.ts --target=node --outdir=dist",
     "smoke:dist": "node test/built-cli-smoke.mjs",
-    "prepublishOnly": "bun run typecheck && bun test && bun run build",
+    "prepublishOnly": "bun run typecheck && bun test && bun run build && npm run smoke:dist",
     "pack:dry": "npm pack --dry-run",
     "publish:dry": "npm publish --dry-run"
   },

@@ -1,0 +1,6 @@
+class Target {
+  method() {}
+function movedThing() {
+  return 42;
+}
+}

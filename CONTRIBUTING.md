@@ -15,5 +15,12 @@ Before sending changes, run:
 bun run typecheck
 bun test
 bun run build
+npm run smoke:dist
 npm run pack:dry
+```
+
+Before publishing an unpublished version, also run:
+
+```sh
+npm run publish:dry
 ```

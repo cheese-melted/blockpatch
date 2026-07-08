@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, link, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -9,7 +9,16 @@ import { moveBlock } from "../src/move";
 import { BlockPatchError } from "../src/errors";
 
 const fixtureRoot = join(import.meta.dir, "fixtures");
+const exampleRoot = join(import.meta.dir, "..", "examples");
 const systemPatchAvailable = hasSystemPatch();
+
+type PublicExampleCase = {
+  name: string;
+  changed: string[];
+  expectedFiles?: string[];
+  missingFiles?: string[];
+  reverse?: boolean;
+};
 
 async function fixtureCase(name: string): Promise<string> {
   const cwd = await mkdtemp(join(tmpdir(), `blockpatch-${name}-`));
@@ -61,6 +70,26 @@ async function expectFixtureFailure(name: string, message: string): Promise<void
   await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(message);
   const after = await readFile(join(cwd, "file.txt"));
   expect(after).toEqual(before);
+}
+
+async function publicExampleWork(name: string): Promise<string> {
+  const parent = await mkdtemp(join(tmpdir(), `blockpatch-example-${name}-`));
+  const cwd = join(parent, "work");
+  await cp(join(exampleRoot, name, "work"), cwd, { recursive: true });
+  return cwd;
+}
+
+async function expectMissing(path: string): Promise<void> {
+  let missing = false;
+  try {
+    await lstat(path);
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ENOENT") {
+      throw error;
+    }
+    missing = true;
+  }
+  expect(missing).toBe(true);
 }
 
 describe("blockpatch golden fixtures", () => {
@@ -242,6 +271,75 @@ describe("blockpatch golden fixtures", () => {
       dst: "file.txt",
       source_range: null
     });
+  });
+});
+
+describe("public examples", () => {
+  const cases: PublicExampleCase[] = [
+    { name: "same-file-relocation", changed: ["file.txt"], expectedFiles: ["file.txt"] },
+    {
+      name: "cross-file-relocation",
+      changed: ["source.txt", "target.txt"],
+      expectedFiles: ["source.txt", "target.txt"]
+    },
+    { name: "insert-existing-file", changed: ["file.txt"], expectedFiles: ["file.txt"] },
+    { name: "delete-existing-file", changed: ["file.txt"], expectedFiles: ["file.txt"] },
+    { name: "create-file", changed: ["file.txt"], expectedFiles: ["file.txt"] },
+    { name: "remove-file", changed: ["file.txt"], missingFiles: ["file.txt"] },
+    { name: "reverse", changed: ["file.txt"], expectedFiles: ["file.txt"], reverse: true }
+  ];
+
+  for (const example of cases) {
+    test(`${example.name} applies from work to expected`, async () => {
+      const cwd = await publicExampleWork(example.name);
+      const patchPath = join(exampleRoot, example.name, "patch.blockpatch");
+      const options = { cwd, reverse: example.reverse ?? false };
+
+      const check = await checkPatchFile(patchPath, options);
+      expect([...check.changed].sort()).toEqual([...example.changed].sort());
+      expect(check.status).toBe("applied");
+      expect(check.written).toBe(false);
+
+      const result = await applyPatchFile(patchPath, options);
+      expect([...result.changed].sort()).toEqual([...example.changed].sort());
+      expect(result.status).toBe("applied");
+      expect(result.written).toBe(true);
+
+      for (const file of example.expectedFiles ?? []) {
+        const actual = await readFile(join(cwd, file));
+        const expected = await readFile(join(exampleRoot, example.name, "expected", file));
+        expect(actual).toEqual(expected);
+      }
+
+      for (const file of example.missingFiles ?? []) {
+        await expectMissing(join(cwd, file));
+      }
+    });
+  }
+
+  test("same-file relocation check command matches the documented example shape", async () => {
+    const cwd = await publicExampleWork("same-file-relocation");
+    const patchPath = join(exampleRoot, "same-file-relocation", "patch.blockpatch");
+    const before = await readFile(join(cwd, "file.txt"));
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", patchPath, "-d", cwd],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stdout).text()).toBe("would change file.txt\n");
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
+  });
+
+  test("failure-ambiguous-target documents a strict matching error", async () => {
+    const cwd = await publicExampleWork("failure-ambiguous-target");
+    const patchPath = join(exampleRoot, "failure-ambiguous-target", "patch.blockpatch");
+    const before = await readFile(join(cwd, "file.txt"));
+
+    await expect(checkPatchFile(patchPath, { cwd })).rejects.toThrow("Target anchor is ambiguous");
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
   });
 });
 
@@ -588,8 +686,9 @@ describe("byte preservation", () => {
 describe("CLI", () => {
   test("supports required check/apply commands", async () => {
     const cwd = await fixtureCase("success");
+    const patchPath = join(cwd, "patch.blockpatch");
     const check = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "patch.blockpatch", "--cwd", cwd],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", patchPath, "--cwd", cwd],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -597,7 +696,7 @@ describe("CLI", () => {
     expect(await new Response(check.stderr).text()).toBe("");
 
     const apply = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "patch.blockpatch", "--cwd", cwd],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", patchPath, "--cwd", cwd],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -613,7 +712,15 @@ describe("CLI", () => {
     const cwd = await fixtureCase("success");
     const before = await readFile(join(cwd, "file.txt"));
     const dryRun = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "patch.blockpatch", "--dry-run", "--cwd", cwd],
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "apply",
+        join(cwd, "patch.blockpatch"),
+        "--dry-run",
+        "--cwd",
+        cwd
+      ],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -625,12 +732,13 @@ describe("CLI", () => {
 
   test("supports apply --reverse and check -R", async () => {
     const cwd = await fixtureCase("success");
+    const patchPath = join(cwd, "patch.blockpatch");
     const before = await readFile(join(cwd, "file.txt"));
     await applyPatchFile("patch.blockpatch", { cwd });
     const applied = await readFile(join(cwd, "file.txt"));
 
     const check = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "-R", "patch.blockpatch", "--cwd", cwd],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "-R", patchPath, "--cwd", cwd],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -639,7 +747,7 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "file.txt"))).toEqual(applied);
 
     const reverse = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "--reverse", "patch.blockpatch", "--cwd", cwd],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "--reverse", patchPath, "--cwd", cwd],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -652,7 +760,15 @@ describe("CLI", () => {
     const cwd = await fixtureCase("success");
     const before = await readFile(join(cwd, "file.txt"));
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "patch.blockpatch", "--explain", "--cwd", cwd],
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "apply",
+        join(cwd, "patch.blockpatch"),
+        "--explain",
+        "--cwd",
+        cwd
+      ],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -724,7 +840,7 @@ describe("CLI", () => {
   test("supports -i, -d, and -p aliases", async () => {
     const cwd = await fixtureCase("success");
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-i", "patch.blockpatch", "-d", cwd, "-p1"],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-i", join(cwd, "patch.blockpatch"), "-d", cwd, "-p1"],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -734,6 +850,25 @@ describe("CLI", () => {
     const actual = await readFile(join(cwd, "file.txt"));
     const expected = await readFile(join(fixtureRoot, "success", "after.txt"));
     expect(actual).toEqual(expected);
+  });
+
+  test("relative patch input paths resolve from the shell working directory", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-relative-input-"));
+    const cwd = join(parent, "repo");
+    await mkdir(cwd);
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    await writeFile(join(parent, "patch.blockpatch"), await readFile(join(fixtureRoot, "success", "patch.blockpatch")));
+
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-d", "repo", "patch.blockpatch"],
+      cwd: parent,
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nomega\ntarget\nmove me\n");
   });
 
   test("-p strips patch-declared path components", async () => {
@@ -1380,7 +1515,16 @@ describe("CLI", () => {
     );
 
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "move.json", "--dry-run", "--cwd", cwd],
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--json",
+        join(cwd, "move.json"),
+        "--dry-run",
+        "--cwd",
+        cwd
+      ],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -1389,6 +1533,38 @@ describe("CLI", () => {
     expect(await new Response(proc.stderr).text()).toBe("");
     const after = await readFile(join(cwd, "source.ts"), "utf8");
     expect(after).toBe(before);
+  });
+
+  test("relative move JSON input paths resolve from the shell working directory", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-relative-move-json-"));
+    const cwd = join(parent, "repo");
+    await mkdir(cwd);
+    await writeFile(
+      join(cwd, "source.ts"),
+      "alpha\nfunction movedThing() {\n  return 42;\n}\nomega\nclass Target {\n}\n"
+    );
+    await writeFile(
+      join(parent, "move.json"),
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        target_before: "class Target {\n"
+      })
+    );
+
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "move.json", "--cwd", "repo"],
+      cwd: parent,
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
   });
 
   test("move --json path may be read outside the working directory", async () => {
@@ -2785,7 +2961,15 @@ describe("format hardening", () => {
       )
     );
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "patch.blockpatch", "--json-output", "--cwd", cwd],
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "apply",
+        join(cwd, "patch.blockpatch"),
+        "--json-output",
+        "--cwd",
+        cwd
+      ],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -2948,6 +3132,40 @@ describe("format hardening", () => {
     expect(await proc.exited).toBe(0);
     const stdout = JSON.parse(await new Response(proc.stdout).text()) as { ok: boolean; version: string };
     expect(stdout.version).toBe(pkg.version);
+  });
+
+  test("version rejects extra arguments", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "version", "typo"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    expect(await new Response(proc.stderr).text()).toContain("Unexpected argument: typo");
+  });
+
+  test("version rejects extra arguments as JSON when requested", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "version", "typo", "--json-output"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      ok: boolean;
+      error: { code: string; message: string };
+    };
+    expect(stderr).toMatchObject({
+      ok: false,
+      error: {
+        code: "too_many_args",
+        message: "Unexpected argument: typo"
+      }
+    });
   });
 });
 
@@ -3279,6 +3497,56 @@ describe("one-sided hunks and null endpoints", () => {
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\ndoomed\nomega\n");
   });
 
+  test("source-only deletion retry with empty before requires after at file start", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-empty-before-"));
+    await writeFile(join(cwd, "patch.blockpatch"), deletionPatch("doomed\n", "", "omega"));
+
+    await writeFile(join(cwd, "file.txt"), "doomed\nomega\n");
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.status).toBe("applied");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("omega\n");
+
+    const retry = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(retry.status).toBe("already_applied");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("omega\n");
+
+    await writeFile(join(cwd, "file.txt"), "unexpected text\nomega\n");
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("source_not_found");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("unexpected text\nomega\n");
+  });
+
+  test("source-only deletion retry with empty after requires before at file end", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-empty-after-"));
+    await writeFile(join(cwd, "patch.blockpatch"), deletionPatch("doomed\n", "alpha", ""));
+
+    await writeFile(join(cwd, "file.txt"), "alpha\ndoomed\n");
+    const result = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(result.status).toBe("applied");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\n");
+
+    const retry = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(retry.status).toBe("already_applied");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\n");
+
+    await writeFile(join(cwd, "file.txt"), "alpha\nunexpected text\n");
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("source_not_found");
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nunexpected text\n");
+  });
+
   test("source-only deletion of all bytes keeps an empty file", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-delete-empty-result-"));
     await writeFile(join(cwd, "file.txt"), "only\ncontent\n");
@@ -3287,6 +3555,10 @@ describe("one-sided hunks and null endpoints", () => {
     const result = await applyPatchFile("patch.blockpatch", { cwd });
     expect(result.status).toBe("applied");
     expect(await fileExists(join(cwd, "file.txt"))).toBe(true);
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("");
+
+    const retry = await applyPatchFile("patch.blockpatch", { cwd });
+    expect(retry.status).toBe("already_applied");
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("");
   });
 
@@ -3393,10 +3665,11 @@ describe("one-sided hunks and null endpoints", () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-mode-"));
     await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\n"));
     const proc = Bun.spawn({
-      cmd: ["sh", "-c", 'umask 077; bun "$BLOCKPATCH_CLI" apply patch.blockpatch --cwd "$PATCH_CWD"'],
+      cmd: ["sh", "-c", 'umask 077; bun "$BLOCKPATCH_CLI" apply "$PATCH_PATH" --cwd "$PATCH_CWD"'],
       env: {
         ...process.env,
         BLOCKPATCH_CLI: join(import.meta.dir, "../src/cli.ts"),
+        PATCH_PATH: join(cwd, "patch.blockpatch"),
         PATCH_CWD: cwd
       },
       stdout: "pipe",

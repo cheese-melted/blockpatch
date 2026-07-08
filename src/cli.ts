@@ -83,6 +83,7 @@ async function main(argv: string[]): Promise<number> {
 
 async function runPatchCommand(options: CliOptions): Promise<ApplyResult> {
   const patchPath = options.patchPath ?? "-";
+  const inputPatchPath = patchPath === "-" ? patchPath : resolve(patchPath);
 
   if (options.command === "check") {
     return patchPath === "-"
@@ -91,7 +92,7 @@ async function runPatchCommand(options: CliOptions): Promise<ApplyResult> {
           reverse: options.reverse,
           stripComponents: options.stripComponents
         })
-      : checkPatchFile(patchPath, {
+      : checkPatchFile(inputPatchPath, {
           cwd: options.cwd,
           reverse: options.reverse,
           stripComponents: options.stripComponents
@@ -105,7 +106,7 @@ async function runPatchCommand(options: CliOptions): Promise<ApplyResult> {
         reverse: options.reverse,
         stripComponents: options.stripComponents
       })
-    : applyPatchFile(patchPath, {
+    : applyPatchFile(inputPatchPath, {
         cwd: options.cwd,
         dryRun: options.dryRun,
         reverse: options.reverse,
@@ -125,7 +126,7 @@ async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
   const jsonBytes =
     options.moveJsonPath === "-"
       ? await readStdin()
-      : await readFileChecked(resolve(options.cwd, options.moveJsonPath), "move JSON file");
+      : await readFileChecked(resolve(options.moveJsonPath), "move JSON file");
 
   try {
     return JSON.parse(jsonBytes.toString("utf8")) as MoveBlockArgs;
@@ -149,7 +150,12 @@ function parseArgs(argv: string[]): CliOptions {
     for (const arg of args) {
       if (isOutputFlag(arg)) {
         options.jsonOutput = true;
+        continue;
       }
+      if (arg.startsWith("-")) {
+        throw new BlockPatchError("unknown_option", `Unknown option: ${arg}`);
+      }
+      throw new BlockPatchError("too_many_args", `Unexpected argument: ${arg}`);
     }
     return options;
   }
