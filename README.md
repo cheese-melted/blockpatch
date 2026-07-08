@@ -55,10 +55,10 @@ export function movedThing() {
 
 The JSON request selects the source bytes and target anchors. The returned `.blockpatch` carries the exact payload and hash, so retries validate the final state without asking the agent to reselect bytes from a changed tree.
 
-Ask `blockpatch` to plan a byte-exact move from JSON:
+Ask `blockpatch` to plan a byte-exact move from JSON and save the JSON envelope:
 
 ```sh
-blockpatch plan --json - <<'JSON'
+blockpatch plan --json - <<'JSON' > plan.json
 {
   "src": "src/foo.ts",
   "src_start": "\nexport function movedThing() {\n",
@@ -69,7 +69,7 @@ blockpatch plan --json - <<'JSON'
 JSON
 ```
 
-Expected output is JSON on stdout. Formatted here with the `patch` string abbreviated:
+`plan.json` contains output like this, with the `patch` string abbreviated here:
 
 ```json
 {
@@ -97,10 +97,11 @@ Expected output is JSON on stdout. Formatted here with the `patch` string abbrev
 
 `plan` validates the source delimiters and target anchors, computes byte ranges, hashes the selected payload, renders a reviewable `.blockpatch`, self-checks that patch against the current tree in memory, and returns the patch in JSON without writing.
 
-Apply the reviewed patch explicitly:
+Review the returned `patch` string, save it as a `.blockpatch`, then validate and apply that artifact explicitly:
 
 ```sh
-blockpatch apply patch.blockpatch --dry-run
+jq -r .patch plan.json > patch.blockpatch
+blockpatch check patch.blockpatch
 blockpatch apply patch.blockpatch
 ```
 
