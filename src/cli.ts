@@ -12,6 +12,26 @@ type Command = "apply" | "check" | "move" | "plan" | "help" | "version";
 
 const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
 
+// Value-taking flag tables are shared by normal parsing and error-path JSON-output recovery.
+const OUTPUT_FLAGS = new Set(["--json-output", "--explain"]);
+const CWD_VALUE_FLAGS = new Set(["--cwd", "--directory", "-d"]);
+const PATCH_INPUT_VALUE_FLAGS = new Set(["-i", "--input"]);
+const STRIP_VALUE_FLAGS = new Set(["-p", "--strip"]);
+const PATCH_VALUE_FLAGS = new Set([...CWD_VALUE_FLAGS, ...PATCH_INPUT_VALUE_FLAGS, ...STRIP_VALUE_FLAGS]);
+const MOVE_JSON_VALUE_FLAGS = new Set(["--json"]);
+const MOVE_KEY_BY_FLAG = {
+  "--src": "src",
+  "--src-start": "src_start",
+  "--src-end": "src_end",
+  "--dst": "dst",
+  "--payload": "payload",
+  "--target-before": "target_before",
+  "--target-after": "target_after",
+  "--expected-payload-sha256": "expected_payload_sha256"
+} as const satisfies Partial<Record<string, keyof MoveBlockArgs>>;
+const MOVE_ARG_VALUE_FLAGS = new Set(Object.keys(MOVE_KEY_BY_FLAG));
+const MOVE_VALUE_FLAGS = new Set([...CWD_VALUE_FLAGS, ...MOVE_JSON_VALUE_FLAGS, ...MOVE_ARG_VALUE_FLAGS]);
+
 interface CliOptions {
   command: Command;
   patchPath?: string;
@@ -127,7 +147,7 @@ function parseArgs(argv: string[]): CliOptions {
   if (first === "version" || first === "--version" || first === "-v") {
     const options = base("version", outputFlags.jsonOutput);
     for (const arg of args) {
-      if (arg === "--json-output" || arg === "--explain") {
+      if (isOutputFlag(arg)) {
         options.jsonOutput = true;
       }
     }
@@ -157,7 +177,7 @@ function parsePatchArgs(
   }
 
   while (args.length > 0) {
-    const arg = args.shift();
+    const arg = args.shift() as string;
     if (takeOutputFlag(options, arg)) {
       continue;
     }
@@ -169,7 +189,7 @@ function parsePatchArgs(
       options.reverse = true;
       continue;
     }
-    if (arg === "--cwd" || arg === "--directory" || arg === "-d") {
+    if (isValueFlag(arg, CWD_VALUE_FLAGS)) {
       options.cwd = requireValue(args, arg, true);
       continue;
     }
@@ -181,7 +201,7 @@ function parsePatchArgs(
       options.cwd = resolve(arg.slice("--directory=".length));
       continue;
     }
-    if (arg === "-i" || arg === "--input") {
+    if (isValueFlag(arg, PATCH_INPUT_VALUE_FLAGS)) {
       setPatchPath(options, requireValue(args, arg, false));
       continue;
     }
@@ -221,7 +241,7 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
   let sawFlagArgs = false;
 
   while (args.length > 0) {
-    const arg = args.shift();
+    const arg = args.shift() as string;
     if (takeOutputFlag(options, arg)) {
       continue;
     }
@@ -233,7 +253,7 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
       options.diff = true;
       continue;
     }
-    if (arg === "--cwd" || arg === "--directory" || arg === "-d") {
+    if (isValueFlag(arg, CWD_VALUE_FLAGS)) {
       options.cwd = requireValue(args, arg, true);
       continue;
     }
@@ -245,8 +265,8 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
       options.cwd = resolve(arg.slice("--directory=".length));
       continue;
     }
-    if (arg === "--json") {
-      options.moveJsonPath = requireValue(args, "--json", false);
+    if (isValueFlag(arg, MOVE_JSON_VALUE_FLAGS)) {
+      options.moveJsonPath = requireValue(args, arg, false);
       continue;
     }
     if (arg?.startsWith("--json=")) {
@@ -275,27 +295,8 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
   return options;
 }
 
-function argToMoveKey(arg: string | undefined): keyof MoveBlockArgs | undefined {
-  switch (arg) {
-    case "--src":
-      return "src";
-    case "--src-start":
-      return "src_start";
-    case "--src-end":
-      return "src_end";
-    case "--dst":
-      return "dst";
-    case "--payload":
-      return "payload";
-    case "--target-before":
-      return "target_before";
-    case "--target-after":
-      return "target_after";
-    case "--expected-payload-sha256":
-      return "expected_payload_sha256";
-    default:
-      return undefined;
-  }
+function argToMoveKey(arg: string): keyof MoveBlockArgs | undefined {
+  return MOVE_KEY_BY_FLAG[arg as keyof typeof MOVE_KEY_BY_FLAG];
 }
 
 function base(command: Command, jsonOutput: boolean): CliOptions {
@@ -317,8 +318,8 @@ function setPatchPath(options: CliOptions, path: string): void {
   options.patchPath = path;
 }
 
-function parseStripOption(arg: string | undefined, args: string[]): number | undefined {
-  if (arg === "-p" || arg === "--strip") {
+function parseStripOption(arg: string, args: string[]): number | undefined {
+  if (isValueFlag(arg, STRIP_VALUE_FLAGS)) {
     return parseStripComponents(requireValue(args, arg, false), arg);
   }
   if (arg?.startsWith("-p") === true && arg.length > 2) {
@@ -345,8 +346,8 @@ function takeLeadingOutputFlags(args: string[]): { jsonOutput: boolean; explain:
   let jsonOutput = false;
   let explain = false;
 
-  while (args[0] === "--json-output" || args[0] === "--explain") {
-    const arg = args.shift();
+  while (isOutputFlag(args[0])) {
+    const arg = args.shift() as string;
     jsonOutput = true;
     explain = explain || arg === "--explain";
   }
@@ -354,11 +355,7 @@ function takeLeadingOutputFlags(args: string[]): { jsonOutput: boolean; explain:
   return { jsonOutput, explain };
 }
 
-function takeOutputFlag(options: CliOptions, arg: string | undefined): boolean {
-  if (arg === "--json-output") {
-    options.jsonOutput = true;
-    return true;
-  }
+function takeOutputFlag(options: CliOptions, arg: string): boolean {
   if (arg === "--explain") {
     options.jsonOutput = true;
     if (options.command === "apply" || options.command === "move" || options.command === "plan") {
@@ -366,7 +363,19 @@ function takeOutputFlag(options: CliOptions, arg: string | undefined): boolean {
     }
     return true;
   }
+  if (arg === "--json-output") {
+    options.jsonOutput = true;
+    return true;
+  }
   return false;
+}
+
+function isOutputFlag(arg: string | undefined): boolean {
+  return arg !== undefined && OUTPUT_FLAGS.has(arg);
+}
+
+function isValueFlag(arg: string | undefined, flags: ReadonlySet<string>): boolean {
+  return arg !== undefined && flags.has(arg);
 }
 
 function requireValue(args: string[], option: string, pathValue: boolean): string {
@@ -483,33 +492,24 @@ function hasJsonOutputFlag(argv: string[]): boolean {
   if (command === "plan") {
     return true;
   }
-  return args.includes("--json-output") || args.includes("--explain");
+  return args.some(isOutputFlag);
 }
 
 function hasPatchJsonOutputFlag(args: string[]): boolean {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "--json-output" || arg === "--explain") {
-      return true;
-    }
-    if (arg === "--cwd" || arg === "--directory" || arg === "-d" || arg === "-i" || arg === "--input") {
-      index += 1;
-      continue;
-    }
-    if (arg === "-p" || arg === "--strip") {
-      index += 1;
-    }
-  }
-  return false;
+  return hasJsonOutputAfterValueFlags(args, PATCH_VALUE_FLAGS);
 }
 
 function hasMoveJsonOutputFlag(args: string[]): boolean {
+  return hasJsonOutputAfterValueFlags(args, MOVE_VALUE_FLAGS);
+}
+
+function hasJsonOutputAfterValueFlags(args: string[], valueFlags: ReadonlySet<string>): boolean {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === "--json-output" || arg === "--explain") {
+    if (isOutputFlag(arg)) {
       return true;
     }
-    if (arg === "--cwd" || arg === "--directory" || arg === "-d" || arg === "--json" || argToMoveKey(arg) !== undefined) {
+    if (isValueFlag(arg, valueFlags)) {
       index += 1;
     }
   }

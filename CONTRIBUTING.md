@@ -12,7 +12,8 @@ Changes should preserve these rules:
 Before sending changes, run:
 
 ```sh
+bun run typecheck
 bun test
 bun run build
-npm publish --dry-run
+npm run pack:dry
 ```
