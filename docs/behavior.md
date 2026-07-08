@@ -2,13 +2,21 @@
 
 `blockpatch` is intentionally strict. It prefers refusing a patch over guessing, regenerating bytes, or applying a fuzzy edit.
 
-For CLI forms and JSON contracts, see [Commands](commands.md). For the `.blockpatch` artifact format, see [Patch spec](spec.md).
+For CLI forms, see [Commands](commands.md). For the `.blockpatch` artifact format and JSON contracts, see [Patch spec](spec.md).
 
 ## Core Invariant
 
 A move transfers one exact, hash-verified payload between endpoints. In a paired move, the source hunk removes exact bytes and the target hunk adds the same exact bytes, so `blockpatch` moves the original source bytes instead of regenerating them.
 
 The payload hash is checked before any write happens. For paired moves, the source `-` payload and target `+` payload must be byte-identical.
+
+## Planning And Retry Flow
+
+`plan --json -` is the canonical planning handshake. It is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. The explicit `move --json - --diff --json-output` form remains supported.
+
+`move --json --diff` is a planner for the current tree. For relocation, in-file deletion, and whole-file removal, the JSON request selects the payload from the current source file; if that source block or file is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion and `create_file` JSON are the exceptions because they include `payload` directly.
+
+A typical flow is: propose a move as JSON, let `blockpatch` validate and render the exact patch, show that patch to the user, then apply the `.blockpatch` in a second explicit step. Retry the `.blockpatch`, not the source-selected JSON plan.
 
 ## Path Containment
 
@@ -25,7 +33,7 @@ Rejected operation paths include:
 
 Relative patch file paths and relative move JSON file paths resolve from the shell working directory, not from `--cwd`. Operation paths declared inside a patch or move JSON request resolve inside `--cwd`.
 
-`/dev/null` is reserved for path absence and is never resolved, opened, or checked against `--cwd`.
+`/dev/null` is reserved for path absence and is never resolved, opened, or checked against `--cwd`. An empty file is a real endpoint while `/dev/null` is the null endpoint. A missing file is an error unless the patch explicitly says `/dev/null`; missing files never silently resolve as empty files.
 
 ## Exact Matching
 
@@ -43,7 +51,33 @@ For target hunks in existing files, `blockpatch` locates exactly one target matc
 target context before + target context after
 ```
 
-The moved bytes are extracted from the source file, not regenerated from arguments. `move --json` and generated `move --diff` output are UTF-8 text interfaces and are not intended for arbitrary binary payloads or invalid UTF-8 byte sequences.
+For target hunks in existing files, insertion occurs between target-before and target-after context:
+
+```diff
+@@ -40,2 +40,3 @@ blockpatch-target id=move-1
+ context before
++moved payload
+ context after
+```
+
+The moved bytes are extracted from the source file, not regenerated from arguments.
+
+## Move JSON Behavior
+
+Matching and insertion are byte-exact: the moved bytes are cut at the source and inserted directly at the anchor boundary, with no newline handling. Keep delimiters and anchors on line boundaries or the result will splice mid-line. Include the surrounding newlines you want moved in `src_start` and `src_end`.
+
+For source selection, each `src_start` match pairs with the first `src_end` occurrence after it. The resulting source delimiter match must be unique.
+
+For target placement:
+
+- insertion is between the before and after contexts, and their concatenation must match exactly once.
+- if only `target_before` is supplied, insertion is immediately after that context.
+- if only `target_after` is supplied, insertion is immediately before that context.
+- either target side may be empty when both are supplied, but not both may be empty.
+
+When `expected_payload_sha256` is supplied, the moved or materialized payload bytes must hash to that value before any write happens.
+
+Same-file source and target overlap is a hard failure.
 
 ## Patch Evaluation
 
@@ -61,6 +95,8 @@ For one patch, `blockpatch`:
 10. Applies the hunk transition: remove source payload, insert target payload, or both.
 11. Applies any path-state transition from `/dev/null`: create the missing destination path or remove the source path.
 12. Writes changed files with temp-file-and-rename replacement.
+
+Line-number ranges are review hints only. `blockpatch` validates hunk body line counts, but it locates changes by exact context and payload bytes.
 
 ## One-Sided And Null-Endpoint Behavior
 
@@ -96,8 +132,6 @@ Rules for `file -> /dev/null` removal:
 - zero-byte payload is valid and removes an empty file.
 - the existing file bytes must exactly equal the source payload; then the path is removed.
 - if the source path is already missing, the result is `already_applied`.
-
-In JSON output, a target-only insertion has `source_range: null`, and a source-only deletion has `target_range: null` and `insert_index: null`. A null path endpoint is rendered as the string `/dev/null` in `src` or `dst`.
 
 ## Idempotence
 
@@ -152,6 +186,20 @@ Once renames begin, a two-file operation is not transactional. The destination i
 - the target anchor overlaps the source payload
 - file I/O fails before a write completes
 
-## Error Shape
+## Output Modes
 
-With `--json-output`, errors use the stable error-code contract documented in [Commands](commands.md#json-output). Agents should branch on `error.code`, not on human-readable messages.
+Without `--json-output`, successful commands print `changed <path>`, `would change <path>`, or `unchanged <path>`.
+
+With `--json-output`, successes and errors use the stable contract documented in [Patch spec](spec.md#json-output). Agents should branch on `error.code`, not on human-readable messages.
+
+## Intentionally Out Of Scope
+
+`blockpatch` does not implement:
+
+- multiple independent moves in one patch document
+- arbitrary generated diffs from before/after file snapshots
+- fuzzy matching
+- AST parsing
+- code formatting
+- copy operations
+- regex anchors

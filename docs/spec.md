@@ -1,6 +1,10 @@
-# blockpatch Patch Spec
+# blockpatch Spec
 
-This is the canonical `.blockpatch` format. The header line `blockpatch version 1` is required syntax for the current format.
+This document defines the `.blockpatch` artifact format, move JSON request contract, and JSON output contract. The public API is the CLI and JSON output; TypeScript exports are internal.
+
+For command forms, see [Commands](commands.md). For planning, matching, idempotence, and write behavior, see [Behavior](behavior.md).
+
+The header line `blockpatch version 1` is required syntax for the current `.blockpatch` format.
 
 ## Format
 
@@ -31,7 +35,7 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
    methodAfter() {
 ```
 
-Line numbers in hunk headers are review hints only. Application uses context and exact payload verification, not line numbers.
+Line numbers in hunk headers are review hints only.
 
 Same-file moves, insertions, and deletions use one file section. In that shape, the `--- a/<path>` and `+++ b/<path>` headers must name the same file after normal path cleanup.
 
@@ -85,19 +89,10 @@ Format constraints:
 
 - The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping: `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
 - `blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
-- Source context before and after are exact byte anchors. Either side may be empty, and payload-only source hunks are allowed if the payload is unique.
-- Target hunks for existing files must include context on at least one side. `blockpatch` matches `target context before + target context after` exactly once in the destination file and inserts at `start + target context before.length`.
+- Source context before and after may each be empty.
+- Target hunks for existing files must include context on at least one side.
 - Either target side may be empty, but not both, unless the target hunk is a whole-file `/dev/null -> file` creation hunk.
-- The `-<old-start>,<old-count> +<new-start>,<new-count>` ranges are line-number hints for review, not match authority. `blockpatch` validates the line counts against the hunk body, but it locates changes by exact context and payload bytes.
-
-That means insertion occurs between target-before and target-after context:
-
-```diff
-@@ -40,2 +40,3 @@ blockpatch-target id=move-1
- context before
-+moved payload
- context after
-```
+- The `-<old-start>,<old-count> +<new-start>,<new-count>` ranges must match the hunk body line counts, but the range values are line-number hints for review.
 
 ## One-Sided Hunks And Null Endpoints
 
@@ -133,9 +128,9 @@ blockpatch move id=move-1 payload-sha256=<sha256 of the removed payload>
  context after
 ```
 
-`/dev/null` is reserved for path absence. It appears bare, without an `a/` or `b/` prefix, exactly as in git diffs, so it can never collide with a real file named `dev/null` (which would appear as `a/dev/null`). The token is recognized during parsing and is never resolved, opened, or checked against `--cwd`; path validation and `-p` stripping do not apply to it.
+`/dev/null` is reserved for path absence. It appears bare, without an `a/` or `b/` prefix, exactly as in git diffs, so it can never collide with a real file named `dev/null` (which would appear as `a/dev/null`).
 
-Use `/dev/null` only when the file path itself is absent before or after the patch. A move from `/dev/null` creates a file from a whole-file target payload:
+Use `/dev/null` only when the file path itself is absent before or after the patch. A `/dev/null -> file` section is the whole-file creation shape:
 
 ```diff
 diff --blockpatch /dev/null b/src/new.txt
@@ -149,7 +144,7 @@ blockpatch move id=move-1 payload-sha256=<sha256 of the file payload>
 +second line
 ```
 
-A move to `/dev/null` removes a file after verifying a whole-file source payload:
+A `file -> /dev/null` section is the whole-file removal shape:
 
 ```diff
 diff --blockpatch a/src/old.txt /dev/null
@@ -174,8 +169,6 @@ The section shapes and their meaning:
 | `file -> /dev/null`, source hunk only | remove a file |
 | `/dev/null -> /dev/null` | invalid |
 
-The key distinction is that an empty file is a real endpoint while `/dev/null` is the null endpoint. A missing file is an error unless the patch explicitly says `/dev/null`; missing files never silently resolve as empty files.
-
 Matching rules, idempotence, reverse application, and write behavior are documented in [Behavior](behavior.md).
 
 ## Byte Rules
@@ -192,14 +185,168 @@ The byte content after the prefix is matched exactly, including line endings. Th
 
 Blank lines are separators between the header and hunks. A blank line inside a hunk body is an error; encode an empty context line as a single space.
 
-## Intentionally Out Of Scope
+## Move JSON
 
-The current format does not implement:
+Move JSON is the request contract accepted by `blockpatch plan --json` and `blockpatch move --json`.
 
-- multiple independent moves in one patch document
-- arbitrary generated diffs from before/after file snapshots
-- fuzzy matching
-- AST parsing
-- code formatting
-- copy operations
-- regex anchors
+```ts
+type MoveBlockArgs = {
+  src: string
+  src_start?: string
+  src_end?: string
+  dst?: string
+  payload?: string
+  target_before?: string
+  target_after?: string
+  expected_payload_sha256?: string
+  mode?: "create_file" | "remove_file"
+  dry_run?: boolean
+}
+```
+
+Request shapes:
+
+- For relocation, `src_start` and `src_end` are inclusive source delimiters, and `dst` defaults to `src`.
+- For deletion, set `dst` to `/dev/null`; `src_start` and `src_end` select the removed payload.
+- For insertion, set `src` to `/dev/null`; `dst`, `payload`, and target context are required.
+- For file creation, set `src` to `/dev/null`, set `mode` to `create_file`, and provide `dst` plus `payload`. Empty payload is valid and creates an empty file.
+- For file removal, set `dst` to `/dev/null` and set `mode` to `remove_file`. The whole source file is selected as the payload.
+- Without `mode`, `/dev/null` denotes the absent source or target hunk endpoint for in-file insertion/deletion; `move --diff` renders those as normal same-file one-sided patch sections.
+- Use `mode: "create_file"` or `mode: "remove_file"` for whole-file path creation/removal; `move --diff` renders those as `.blockpatch` documents with `/dev/null` file headers.
+- `target_before`, `target_after`, or both are required for relocation and insertion.
+- `payload` is only valid when `src` is `/dev/null`; it must be non-empty for in-file insertion.
+- `expected_payload_sha256` is optional.
+
+Insertion:
+
+```json
+{
+  "src": "/dev/null",
+  "dst": "src/foo.ts",
+  "payload": "inserted bytes\n",
+  "target_before": "context before\n"
+}
+```
+
+Deletion:
+
+```json
+{
+  "src": "src/foo.ts",
+  "src_start": "function removeMe() {\n",
+  "src_end": "}\n",
+  "dst": "/dev/null"
+}
+```
+
+File creation:
+
+```json
+{
+  "src": "/dev/null",
+  "dst": "src/new.ts",
+  "payload": "export const x = 1;\n",
+  "mode": "create_file"
+}
+```
+
+File removal:
+
+```json
+{
+  "src": "src/old.ts",
+  "dst": "/dev/null",
+  "mode": "remove_file",
+  "expected_payload_sha256": "<sha256>"
+}
+```
+
+Matching behavior for move JSON requests is documented in [Behavior](behavior.md#move-json-behavior).
+
+## JSON Output
+
+With `--json-output`, successful commands print:
+
+```ts
+type ApplyResult = {
+  ok: true
+  changed: string[]
+  affected: string[]
+  written: boolean
+  noop: boolean
+  status: "applied" | "noop" | "already_applied"
+  strip_components?: number
+  patch?: string
+  moves: Array<{
+    id: string
+    src: string
+    dst: string
+    payload_sha256: string
+    payload_bytes: number
+    source_range: { start: number; end: number } | null
+    target_range: { start: number; end: number } | null
+    insert_index: number | null
+  }>
+}
+```
+
+`changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes.
+
+`status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the command can prove the requested final state is already present. `strip_components` is present for `check` and `apply` JSON success output and reports the effective `-p` path-stripping count; it defaults to `1`.
+
+`patch` is present when `move --diff --json-output` is used. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`.
+
+With `--json-output`, errors print:
+
+```ts
+type BlockPatchJsonError = {
+  ok: false
+  error: {
+    code: BlockPatchErrorCode
+    message: string
+    field?: string
+    path?: string
+    phase?: string
+    anchor?: string
+    matches?: number
+    ranges?: Array<{ start: number; end: number }>
+    line_ranges?: Array<{ start: number; end: number }>
+  }
+}
+```
+
+Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. They do not include source snippets, fuzzy suggestions, or repair guidance.
+
+Error codes are the agent-facing branch contract. Removing a code or changing its meaning is semver-major.
+
+```ts
+type BlockPatchErrorCode =
+  | "parse_error"
+  | "invalid_path"
+  | "path_outside_cwd"
+  | "symlink_path"
+  | "file_not_found"
+  | "not_regular_file"
+  | "permission_denied"
+  | "io_error"
+  | "source_not_found"
+  | "source_ambiguous"
+  | "target_not_found"
+  | "target_ambiguous"
+  | "destination_exists"
+  | "payload_mismatch"
+  | "hash_mismatch"
+  | "invalid_utf8"
+  | "target_overlaps_source"
+  | "invalid_move_args"
+  | "invalid_json"
+  | "missing_move_args"
+  | "unknown_command"
+  | "unknown_option"
+  | "invalid_option"
+  | "missing_option_value"
+  | "too_many_args"
+  | "unexpected_error"
+```
+
+`unexpected_error` is the generic fallback for non-`BlockPatchError` failures; agents should treat it as an internal failure and avoid branching on its message.

@@ -1,7 +1,8 @@
 {
   "name": "blockpatch",
   "version": "1.0.0",
-  "description": "Anchored text block relocation patches",
+  "description": "Hash-verified, reviewable block-move patches for coding agents",
+  "packageManager": "bun@1.3.14",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -42,7 +43,7 @@
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
-    "@types/node": "^26.1.0",
+    "@types/node": "^20",
     "typescript": "^5.8.3"
   },
   "engines": {
