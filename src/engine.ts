@@ -70,6 +70,20 @@ interface InMemoryFileState {
   identity: string;
 }
 
+interface PatchWorkspace {
+  files: Map<string, InMemoryFileState>;
+  paths: Map<string, string>;
+}
+
+type PatchMutation =
+  | { kind: "write"; label: string; bytes: Buffer; create?: boolean }
+  | { kind: "delete"; label: string };
+
+interface PlannedPatch {
+  result: ApplyResult;
+  mutations: PatchMutation[];
+}
+
 export async function checkPatchFile(
   patchPath: string,
   options: ApplyOptions = {}
@@ -90,7 +104,8 @@ export function checkPatchBytesInMemory(
   options: Pick<ApplyOptions, "reverse" | "stripComponents"> = {}
 ): ApplyResult {
   const patch = parseBlockPatch(patchBytes, { stripComponents: options.stripComponents });
-  return checkMovePatchInMemory(patch, memoryFileMap(files), options.reverse ?? false);
+  const effectivePatch = options.reverse === true ? reverseMovePatch(patch) : patch;
+  return planMovePatch(effectivePatch, memoryFileMap(files)).result;
 }
 
 export async function applyPatchFile(
@@ -126,114 +141,161 @@ async function applyMovePatch(
   reverse: boolean
 ): Promise<ApplyResult> {
   const effectivePatch = reverse ? reverseMovePatch(patch) : patch;
-  if (effectivePatch.src === null || effectivePatch.dst === null) {
-    if (effectivePatch.src === null && effectivePatch.dst !== null && !effectivePatch.hasSourceHunk) {
-      return applyPathCreationMove(effectivePatch, effectivePatch.dst, cwd, dryRun);
+  const workspace = await readPatchWorkspace(effectivePatch, cwd);
+  const plan = planMovePatch(effectivePatch, workspace.files);
+  if (!dryRun) {
+    await commitPatchMutations(plan.mutations, workspace.paths);
+  }
+  return resultWithWriteFlag(plan.result, dryRun);
+}
+
+async function readPatchWorkspace(patch: BlockPatch, cwd: string): Promise<PatchWorkspace> {
+  const workspace: PatchWorkspace = {
+    files: new Map(),
+    paths: new Map()
+  };
+
+  if (patch.src === null || patch.dst === null) {
+    if (patch.src === null && patch.dst !== null && !patch.hasSourceHunk) {
+      const resolved = resolvePathAllowMissing(cwd, patch.dst, "destination path");
+      rememberPath(workspace, patch.dst, resolved.path);
+      if (resolved.exists) {
+        rememberFile(workspace, patch.dst, resolved.path, await readFileChecked(resolved.path, "destination file"));
+      }
+      return workspace;
     }
-    if (effectivePatch.dst === null && effectivePatch.src !== null && effectivePatch.hasSourceHunk) {
-      return applyPathDeletionMove(effectivePatch, effectivePatch.src, cwd, dryRun);
+    if (patch.dst === null && patch.src !== null && patch.hasSourceHunk) {
+      const resolved = resolvePathAllowMissing(cwd, patch.src, "source path");
+      rememberPath(workspace, patch.src, resolved.path);
+      if (resolved.exists) {
+        rememberFile(workspace, patch.src, resolved.path, await readFileChecked(resolved.path, "source file"));
+      }
+      return workspace;
     }
     fail("parse_error", "Invalid /dev/null endpoint move shape");
   }
 
-  if (!effectivePatch.hasSourceHunk) {
-    return applyInFileInsertionMove(effectivePatch, effectivePatch.src, effectivePatch.dst, cwd, dryRun);
+  if (!patch.hasSourceHunk) {
+    const dstPath = resolvePath(cwd, patch.dst, "destination path");
+    rememberFile(workspace, patch.dst, dstPath, await readFileChecked(dstPath, "destination file"));
+    return workspace;
   }
 
-  if (effectivePatch.target === null) {
-    return applyInFileDeletionMove(effectivePatch, effectivePatch.src, effectivePatch.dst, cwd, dryRun);
+  if (patch.target === null) {
+    const srcPath = resolvePath(cwd, patch.src, "source path");
+    rememberFile(workspace, patch.src, srcPath, await readFileChecked(srcPath, "source file"));
+    return workspace;
   }
 
-  const srcLabel = effectivePatch.src;
-  const dstLabel = effectivePatch.dst;
-  const srcPath = resolvePath(cwd, srcLabel, "source path");
-  const dstPath = resolvePath(cwd, dstLabel, "destination path");
+  const srcPath = resolvePath(cwd, patch.src, "source path");
+  const dstPath = resolvePath(cwd, patch.dst, "destination path");
   const sameFile = await sameFileIdentity(srcPath, dstPath);
   const srcOriginal = await readFileChecked(srcPath, "source file");
   const dstOriginal = sameFile ? srcOriginal : await readFileChecked(dstPath, "destination file");
-  const plan = selectMovePlan(srcOriginal, dstOriginal, effectivePatch, sameFile);
+  const identity = sameFile ? "paired-file" : undefined;
+  rememberFile(workspace, patch.src, srcPath, srcOriginal, identity);
+  rememberFile(workspace, patch.dst, dstPath, dstOriginal, identity);
+  return workspace;
+}
 
-  if (plan.status === "already_applied") {
-    return {
-      changed: [],
-      affected: unique([srcLabel, dstLabel]),
-      written: false,
-      noop: true,
-      status: "already_applied",
-      moves: [plan.details]
-    };
+function rememberPath(workspace: PatchWorkspace, label: string, path: string): void {
+  workspace.paths.set(label, path);
+}
+
+function rememberFile(
+  workspace: PatchWorkspace,
+  label: string,
+  path: string,
+  bytes: Buffer,
+  identity = path
+): void {
+  rememberPath(workspace, label, path);
+  workspace.files.set(label, { bytes, identity });
+}
+
+async function commitPatchMutations(mutations: readonly PatchMutation[], paths: Map<string, string>): Promise<void> {
+  const writes: AtomicWriteRequest[] = [];
+  const deletes: string[] = [];
+
+  for (const mutation of mutations) {
+    const path = mutationPath(paths, mutation.label);
+    if (mutation.kind === "write") {
+      writes.push({ path, bytes: mutation.bytes, create: mutation.create });
+    } else {
+      deletes.push(path);
+    }
   }
 
-  const selection = plan.selection;
-  const changed = await commitMove({
-    srcPath,
-    dstPath,
-    sameFile,
-    dryRun,
-    srcOriginal,
-    dstOriginal,
-    selection,
-    srcLabel,
-    dstLabel
-  });
+  await writeAtomically(writes);
 
+  for (const path of deletes) {
+    try {
+      await unlink(path);
+    } catch (error) {
+      failFileSystem(error, path, "Could not remove file");
+    }
+  }
+}
+
+function mutationPath(paths: Map<string, string>, label: string): string {
+  const path = paths.get(label);
+  if (path === undefined) {
+    fail("parse_error", `No resolved path for planned mutation: ${label}`, { path: label, phase: "path" });
+  }
+  return path;
+}
+
+function resultWithWriteFlag(result: ApplyResult, dryRun: boolean): ApplyResult {
   return {
-    changed,
-    affected: unique([srcLabel, dstLabel]),
-    written: !dryRun && changed.length > 0,
-    noop: changed.length === 0,
-    status: changed.length === 0 ? "noop" : "applied",
-    moves: [
-      moveResultDetails({
-        id: effectivePatch.id,
-        src: srcLabel,
-        dst: dstLabel,
-        payloadSha256: effectivePatch.payloadSha256,
-        selection
-      })
-    ]
+    ...result,
+    written: result.status === "applied" && !dryRun && result.changed.length > 0
   };
 }
 
-function checkMovePatchInMemory(
-  patch: BlockPatch,
-  files: Map<string, InMemoryFileState>,
-  reverse: boolean
-): ApplyResult {
-  const effectivePatch = reverse ? reverseMovePatch(patch) : patch;
+function planMovePatch(effectivePatch: BlockPatch, files: Map<string, InMemoryFileState>): PlannedPatch {
   if (effectivePatch.src === null || effectivePatch.dst === null) {
     if (effectivePatch.src === null && effectivePatch.dst !== null && !effectivePatch.hasSourceHunk) {
-      return checkPathCreationMoveInMemory(effectivePatch, effectivePatch.dst, files);
+      return planPathCreationMove(effectivePatch, effectivePatch.dst, files);
     }
     if (effectivePatch.dst === null && effectivePatch.src !== null && effectivePatch.hasSourceHunk) {
-      return checkPathDeletionMoveInMemory(effectivePatch, effectivePatch.src, files);
+      return planPathDeletionMove(effectivePatch, effectivePatch.src, files);
     }
     fail("parse_error", "Invalid /dev/null endpoint move shape");
   }
 
   if (!effectivePatch.hasSourceHunk) {
-    return checkInFileInsertionMoveInMemory(effectivePatch, effectivePatch.src, effectivePatch.dst, files);
+    return planInFileInsertionMove(effectivePatch, effectivePatch.src, effectivePatch.dst, files);
   }
 
   if (effectivePatch.target === null) {
-    return checkInFileDeletionMoveInMemory(effectivePatch, effectivePatch.src, effectivePatch.dst, files);
+    return planInFileDeletionMove(effectivePatch, effectivePatch.src, effectivePatch.dst, files);
   }
 
-  const srcLabel = effectivePatch.src;
-  const dstLabel = effectivePatch.dst;
+  return planPairedMove(effectivePatch, files);
+}
+
+function planPairedMove(patch: BlockPatch, files: Map<string, InMemoryFileState>): PlannedPatch {
+  if (patch.src === null || patch.dst === null) {
+    fail("parse_error", "Paired move requires source and destination paths");
+  }
+  const srcLabel = patch.src;
+  const dstLabel = patch.dst;
   const srcFile = readMemoryFile(files, srcLabel, "source file");
   const sameFile = sameMemoryFile(files, srcLabel, dstLabel);
   const dstFile = sameFile ? srcFile : readMemoryFile(files, dstLabel, "destination file");
-  const plan = selectMovePlan(srcFile, dstFile, effectivePatch, sameFile);
+  const plan = selectMovePlan(srcFile, dstFile, patch, sameFile);
 
   if (plan.status === "already_applied") {
     return {
-      changed: [],
-      affected: unique([srcLabel, dstLabel]),
-      written: false,
-      noop: true,
-      status: "already_applied",
-      moves: [plan.details]
+      result: {
+        changed: [],
+        affected: unique([srcLabel, dstLabel]),
+        written: false,
+        noop: true,
+        status: "already_applied",
+        moves: [plan.details]
+      },
+      mutations: []
     };
   }
 
@@ -242,20 +304,23 @@ function checkMovePatchInMemory(
   const changed = changedMoveLabels(srcLabel, dstLabel, sameFile, srcFile, dstFile, next);
 
   return {
-    changed,
-    affected: unique([srcLabel, dstLabel]),
-    written: false,
-    noop: changed.length === 0,
-    status: changed.length === 0 ? "noop" : "applied",
-    moves: [
-      moveResultDetails({
-        id: effectivePatch.id,
-        src: srcLabel,
-        dst: dstLabel,
-        payloadSha256: effectivePatch.payloadSha256,
-        selection
-      })
-    ]
+    result: {
+      changed,
+      affected: unique([srcLabel, dstLabel]),
+      written: false,
+      noop: changed.length === 0,
+      status: changed.length === 0 ? "noop" : "applied",
+      moves: [
+        moveResultDetails({
+          id: patch.id,
+          src: srcLabel,
+          dst: dstLabel,
+          payloadSha256: patch.payloadSha256,
+          selection
+        })
+      ]
+    },
+    mutations: moveMutations(srcLabel, dstLabel, sameFile, srcFile, dstFile, next)
   };
 }
 
@@ -279,79 +344,29 @@ function reverseMovePatch(patch: BlockPatch): BlockPatch {
   };
 }
 
-async function applyInFileInsertionMove(
-  patch: BlockPatch,
-  srcLabel: string,
-  dstLabel: string,
-  cwd: string,
-  dryRun: boolean
-): Promise<ApplyResult> {
-  const target = requireTarget(patch);
-  const dstPath = resolvePath(cwd, dstLabel, "destination path");
-  const original = await readFileChecked(dstPath, "destination file");
-  const alreadyApplied = findAlreadyAppliedTargetSelection(original, patch, dstLabel);
-  if (alreadyApplied !== undefined) {
-    return oneSidedResult({
-      patch,
-      src: srcLabel,
-      dst: dstLabel,
-      changed: [],
-      dryRun,
-      status: "already_applied",
-      sourceRange: null,
-      targetRange: alreadyApplied.range,
-      insertIndex: alreadyApplied.insertIndex
-    });
-  }
-
-  const selection = findTargetSelection(original, target.before, target.after, dstLabel, {
-    phase: "target",
-    anchor: "blockpatch-target"
-  });
-  const next = Buffer.concat([
-    original.subarray(0, selection.insertIndex),
-    patch.sourcePayload,
-    original.subarray(selection.insertIndex)
-  ]);
-
-  if (!dryRun) {
-    await writeAtomically([{ path: dstPath, bytes: next }]);
-  }
-
-  return oneSidedResult({
-    patch,
-    src: srcLabel,
-    dst: dstLabel,
-    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
-    dryRun,
-    status: next.equals(original) ? "noop" : "applied",
-    sourceRange: null,
-    targetRange: selection.range,
-    insertIndex: selection.insertIndex
-  });
-}
-
-function checkInFileInsertionMoveInMemory(
+function planInFileInsertionMove(
   patch: BlockPatch,
   srcLabel: string,
   dstLabel: string,
   files: Map<string, InMemoryFileState>
-): ApplyResult {
+): PlannedPatch {
   const target = requireTarget(patch);
   const original = readMemoryFile(files, dstLabel, "destination file");
   const alreadyApplied = findAlreadyAppliedTargetSelection(original, patch, dstLabel);
   if (alreadyApplied !== undefined) {
-    return oneSidedResult({
-      patch,
-      src: srcLabel,
-      dst: dstLabel,
-      changed: [],
-      dryRun: true,
-      status: "already_applied",
-      sourceRange: null,
-      targetRange: alreadyApplied.range,
-      insertIndex: alreadyApplied.insertIndex
-    });
+    return {
+      result: oneSidedResult({
+        patch,
+        src: srcLabel,
+        dst: dstLabel,
+        changed: [],
+        status: "already_applied",
+        sourceRange: null,
+        targetRange: alreadyApplied.range,
+        insertIndex: alreadyApplied.insertIndex
+      }),
+      mutations: []
+    };
   }
 
   const selection = findTargetSelection(original, target.before, target.after, dstLabel, {
@@ -363,98 +378,63 @@ function checkInFileInsertionMoveInMemory(
     patch.sourcePayload,
     original.subarray(selection.insertIndex)
   ]);
+  const changed = next.equals(original) ? [] : unique([srcLabel, dstLabel]);
 
-  return oneSidedResult({
-    patch,
-    src: srcLabel,
-    dst: dstLabel,
-    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
-    dryRun: true,
-    status: next.equals(original) ? "noop" : "applied",
-    sourceRange: null,
-    targetRange: selection.range,
-    insertIndex: selection.insertIndex
-  });
-}
-
-async function applyInFileDeletionMove(
-  patch: BlockPatch,
-  srcLabel: string,
-  dstLabel: string,
-  cwd: string,
-  dryRun: boolean
-): Promise<ApplyResult> {
-  const srcPath = resolvePath(cwd, srcLabel, "source path");
-  const original = await readFileChecked(srcPath, "source file");
-  const source = findDeletionSourceRange(original, patch, srcLabel);
-
-  if (source === undefined) {
-    return oneSidedResult({
+  return {
+    result: oneSidedResult({
       patch,
       src: srcLabel,
       dst: dstLabel,
-      changed: [],
-      dryRun,
-      status: "already_applied",
+      changed,
+      status: changed.length === 0 ? "noop" : "applied",
       sourceRange: null,
-      targetRange: null,
-      insertIndex: null
-    });
-  }
-
-  const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
-  if (!dryRun) {
-    await writeAtomically([{ path: srcPath, bytes: next }]);
-  }
-
-  return oneSidedResult({
-    patch,
-    src: srcLabel,
-    dst: dstLabel,
-    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
-    dryRun,
-    status: next.equals(original) ? "noop" : "applied",
-    sourceRange: source,
-    targetRange: null,
-    insertIndex: null
-  });
+      targetRange: selection.range,
+      insertIndex: selection.insertIndex
+    }),
+    mutations: changed.length === 0 ? [] : [{ kind: "write", label: dstLabel, bytes: next }]
+  };
 }
 
-function checkInFileDeletionMoveInMemory(
+function planInFileDeletionMove(
   patch: BlockPatch,
   srcLabel: string,
   dstLabel: string,
   files: Map<string, InMemoryFileState>
-): ApplyResult {
+): PlannedPatch {
   const original = readMemoryFile(files, srcLabel, "source file");
   const source = findDeletionSourceRange(original, patch, srcLabel);
 
   if (source === undefined) {
-    return oneSidedResult({
-      patch,
-      src: srcLabel,
-      dst: dstLabel,
-      changed: [],
-      dryRun: true,
-      status: "already_applied",
-      sourceRange: null,
-      targetRange: null,
-      insertIndex: null
-    });
+    return {
+      result: oneSidedResult({
+        patch,
+        src: srcLabel,
+        dst: dstLabel,
+        changed: [],
+        status: "already_applied",
+        sourceRange: null,
+        targetRange: null,
+        insertIndex: null
+      }),
+      mutations: []
+    };
   }
 
   const next = Buffer.concat([original.subarray(0, source.start), original.subarray(source.end)]);
-  return oneSidedResult({
-    patch,
-    src: srcLabel,
-    dst: dstLabel,
-    changed: next.equals(original) ? [] : unique([srcLabel, dstLabel]),
-    dryRun: true,
-    status: next.equals(original) ? "noop" : "applied",
-    sourceRange: source,
-    targetRange: null,
-    insertIndex: null
-  });
+  const changed = next.equals(original) ? [] : unique([srcLabel, dstLabel]);
+  return {
+    result: oneSidedResult({
+      patch,
+      src: srcLabel,
+      dst: dstLabel,
+      changed,
+      status: changed.length === 0 ? "noop" : "applied",
+      sourceRange: source,
+      targetRange: null,
+      insertIndex: null
+    }),
+    mutations: changed.length === 0 ? [] : [{ kind: "write", label: srcLabel, bytes: next }]
+  };
 }
 
 function oneSidedResult(args: {
@@ -462,7 +442,6 @@ function oneSidedResult(args: {
   src: string;
   dst: string;
   changed: string[];
-  dryRun: boolean;
   status: "applied" | "noop" | "already_applied";
   sourceRange: ByteRange | null;
   targetRange: ByteRange | null;
@@ -471,7 +450,7 @@ function oneSidedResult(args: {
   return {
     changed: args.changed,
     affected: unique([args.src, args.dst]),
-    written: args.status === "applied" && !args.dryRun && args.changed.length > 0,
+    written: false,
     noop: args.status !== "applied" || args.changed.length === 0,
     status: args.status,
     moves: [
@@ -489,17 +468,20 @@ function oneSidedResult(args: {
   };
 }
 
-function checkPathCreationMoveInMemory(
+function planPathCreationMove(
   patch: BlockPatch,
   dstLabel: string,
   files: Map<string, InMemoryFileState>
-): ApplyResult {
+): PlannedPatch {
   const fullTarget = fullTargetBytes(patch);
   const original = files.get(dstLabel)?.bytes;
 
   if (original !== undefined) {
     if (original.equals(fullTarget)) {
-      return nullSourceResult(patch, dstLabel, true, "already_applied", { start: 0, end: original.length }, 0);
+      return {
+        result: nullSourceResult(patch, dstLabel, "already_applied", { start: 0, end: original.length }, 0),
+        mutations: []
+      };
     }
     fail("destination_exists", `Destination path for file creation already exists with different bytes: ${dstLabel}`, {
       path: dstLabel,
@@ -508,45 +490,23 @@ function checkPathCreationMoveInMemory(
     });
   }
 
-  return nullSourceResult(patch, dstLabel, true, "applied", { start: 0, end: 0 }, 0);
+  return {
+    result: nullSourceResult(patch, dstLabel, "applied", { start: 0, end: 0 }, 0),
+    mutations: [{ kind: "write", label: dstLabel, bytes: fullTarget, create: true }]
+  };
 }
 
-// /dev/null -> file: create the file path with the patch-carried whole-file payload.
-async function applyPathCreationMove(
-  patch: BlockPatch,
-  dstLabel: string,
-  cwd: string,
-  dryRun: boolean
-): Promise<ApplyResult> {
-  const resolved = resolvePathAllowMissing(cwd, dstLabel, "destination path");
-  const fullTarget = fullTargetBytes(patch);
-
-  if (resolved.exists) {
-    const original = await readFileChecked(resolved.path, "destination file");
-    if (original.equals(fullTarget)) {
-      return nullSourceResult(patch, dstLabel, dryRun, "already_applied", { start: 0, end: original.length }, 0);
-    }
-    fail("destination_exists", `Destination path for file creation already exists with different bytes: ${dstLabel}`, {
-      path: dstLabel,
-      phase: "target",
-      anchor: "blockpatch-target"
-    });
-  }
-
-  if (!dryRun) {
-    await writeAtomically([{ path: resolved.path, bytes: fullTarget, create: true }]);
-  }
-  return nullSourceResult(patch, dstLabel, dryRun, "applied", { start: 0, end: 0 }, 0);
-}
-
-function checkPathDeletionMoveInMemory(
+function planPathDeletionMove(
   patch: BlockPatch,
   srcLabel: string,
   files: Map<string, InMemoryFileState>
-): ApplyResult {
+): PlannedPatch {
   const original = files.get(srcLabel)?.bytes;
   if (original === undefined) {
-    return nullTargetResult(patch, srcLabel, true, "already_applied", null);
+    return {
+      result: nullTargetResult(patch, srcLabel, "already_applied", null),
+      mutations: []
+    };
   }
 
   const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
@@ -559,47 +519,13 @@ function checkPathDeletionMoveInMemory(
     });
   }
 
-  return nullTargetResult(patch, srcLabel, true, "applied", {
-    start: patch.sourceBefore.length,
-    end: patch.sourceBefore.length + patch.sourcePayload.length
-  });
-}
-
-// file -> /dev/null: verify the whole-file payload, then remove the path.
-async function applyPathDeletionMove(
-  patch: BlockPatch,
-  srcLabel: string,
-  cwd: string,
-  dryRun: boolean
-): Promise<ApplyResult> {
-  const resolved = resolvePathAllowMissing(cwd, srcLabel, "source path");
-  if (!resolved.exists) {
-    return nullTargetResult(patch, srcLabel, dryRun, "already_applied", null);
-  }
-
-  const original = await readFileChecked(resolved.path, "source file");
-  const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
-  if (!original.equals(fullSource)) {
-    fail("source_not_found", `Whole-file source payload was not found in ${srcLabel}`, {
-      path: srcLabel,
-      phase: "source",
-      anchor: "blockpatch-source",
-      matches: 0
-    });
-  }
-
-  if (!dryRun) {
-    try {
-      await unlink(resolved.path);
-    } catch (error) {
-      failFileSystem(error, srcLabel, "Could not remove file");
-    }
-  }
-
-  return nullTargetResult(patch, srcLabel, dryRun, "applied", {
-    start: patch.sourceBefore.length,
-    end: patch.sourceBefore.length + patch.sourcePayload.length
-  });
+  return {
+    result: nullTargetResult(patch, srcLabel, "applied", {
+      start: patch.sourceBefore.length,
+      end: patch.sourceBefore.length + patch.sourcePayload.length
+    }),
+    mutations: [{ kind: "delete", label: srcLabel }]
+  };
 }
 
 function fullTargetBytes(patch: BlockPatch): Buffer {
@@ -704,7 +630,6 @@ function isDeletionAlreadyAppliedMatch(file: Buffer, patch: BlockPatch, start: n
 function nullSourceResult(
   patch: BlockPatch,
   dstLabel: string,
-  dryRun: boolean,
   status: "applied" | "already_applied",
   targetRange: ByteRange,
   insertIndex: number
@@ -713,7 +638,7 @@ function nullSourceResult(
   return {
     changed: applied ? [dstLabel] : [],
     affected: [dstLabel],
-    written: applied && !dryRun,
+    written: false,
     noop: !applied,
     status,
     moves: [
@@ -734,7 +659,6 @@ function nullSourceResult(
 function nullTargetResult(
   patch: BlockPatch,
   srcLabel: string,
-  dryRun: boolean,
   status: "applied" | "already_applied",
   sourceRange: ByteRange | null
 ): ApplyResult {
@@ -742,7 +666,7 @@ function nullTargetResult(
   return {
     changed: applied ? [srcLabel] : [],
     affected: [srcLabel],
-    written: applied && !dryRun,
+    written: false,
     noop: !applied,
     status,
     moves: [
@@ -1117,6 +1041,28 @@ function changedMoveLabels(
     changed.push(dstLabel);
   }
   return unique(changed);
+}
+
+function moveMutations(
+  srcLabel: string,
+  dstLabel: string,
+  sameFile: boolean,
+  srcOriginal: Buffer,
+  dstOriginal: Buffer,
+  next: { src: Buffer; dst: Buffer }
+): PatchMutation[] {
+  const srcChanged = !next.src.equals(srcOriginal);
+  const dstChanged = !sameFile && !next.dst.equals(dstOriginal);
+  const sameFileAlias = sameFile && srcLabel !== dstLabel;
+  const mutations: PatchMutation[] = [];
+
+  if (dstChanged || (sameFileAlias && srcChanged)) {
+    mutations.push({ kind: "write", label: dstLabel, bytes: next.dst });
+  }
+  if (srcChanged) {
+    mutations.push({ kind: "write", label: srcLabel, bytes: next.src });
+  }
+  return mutations;
 }
 
 function memoryFileMap(files: readonly InMemoryPatchFile[]): Map<string, InMemoryFileState> {
