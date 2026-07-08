@@ -1,6 +1,9 @@
 # blockpatch
 
-tldr, cut paste for agents in using patch / diffs.
+[![CI](https://github.com/cheese-melted/blockpatch/actions/workflows/ci.yml/badge.svg)](https://github.com/cheese-melted/blockpatch/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/blockpatch.svg)](https://www.npmjs.com/package/blockpatch)
+
+Cut/paste for coding agents: hash-verified block moves that read like unified diffs.
 
 `blockpatch` applies anchored text block relocation patches that look like unified diffs.
 
@@ -11,22 +14,16 @@ The core invariant is simple: a move transfers one exact, hash-verified payload 
 ## Install
 
 ```sh
-npx blockpatch check patch.blockpatch
-npx blockpatch apply patch.blockpatch
-npx blockpatch plan --json -
-npx blockpatch move --json -
-bunx blockpatch apply patch.blockpatch --dry-run
 npm install -g blockpatch
+npx blockpatch --help
 ```
 
-For local development:
+## Quick Start
 
 ```sh
-bun install
-bun test
-bun run build
-npm run pack:dry
-node dist/cli.js version
+blockpatch plan --json -
+blockpatch apply patch.blockpatch --dry-run
+blockpatch apply patch.blockpatch
 ```
 
 ## For Coding Agents
@@ -44,12 +41,12 @@ Tiny example:
 
 ```ts
 // before: src/foo.ts
-export function movedThing() {
-  return 42;
-}
-
 export function keepThing() {
   return 7;
+}
+
+export function movedThing() {
+  return 42;
 }
 
 // before: src/bar.ts
@@ -80,11 +77,10 @@ Ask `blockpatch` to plan a byte-exact move from JSON:
 blockpatch plan --json - <<'JSON'
 {
   "src": "src/foo.ts",
-  "src_start": "\nexport function movedThing(",
-  "src_end": "\n}\n",
+  "src_start": "\nexport function movedThing() {\n",
+  "src_end": "}\n",
   "dst": "src/bar.ts",
-  "target_before": "export class Target {\n",
-  "target_after": "}\n"
+  "target_before": "export const target = \"here\";\n"
 }
 JSON
 ```
@@ -114,6 +110,16 @@ blockpatch move --json -
 
 When using `--cwd`, operation paths inside patches and move JSON are relative to `--cwd`; input patch and move JSON filenames are normal CLI paths, relative to your shell working directory unless absolute.
 
+## Development
+
+```sh
+bun install
+bun test
+bun run build
+npm run pack:dry
+node dist/cli.js version
+```
+
 ## Docs
 
 - [Patch spec](docs/spec.md): canonical `.blockpatch` syntax, grammar, one-sided hunks, `/dev/null`, semantics, byte rules, and scope.
@@ -135,4 +141,4 @@ Each example has a `patch.blockpatch`, a runnable `work/` directory, and `expect
 
 ## Scope
 
-`blockpatch` intentionally does not implement fuzzy matching, AST parsing, code formatting, copy operations, regex anchors, or arbitrary generated diffs from before/after snapshots.
+`blockpatch` intentionally does not implement fuzzy matching, AST parsing, code formatting, copy operations, regex anchors, multiple independent moves in one patch document, or arbitrary generated diffs from before/after snapshots.
