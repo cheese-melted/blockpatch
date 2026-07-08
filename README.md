@@ -160,3 +160,5 @@ Each example has a `patch.blockpatch`, a runnable `work/` directory, and `expect
 ## Scope
 
 `blockpatch` intentionally does not implement fuzzy matching, AST parsing, code formatting, copy operations, regex anchors, multiple independent moves in one patch document, or arbitrary generated diffs from before/after snapshots.
+
+`apply` preserves patch body bytes exactly, but `plan`/`move --json` are text-oriented and intended for source files, not arbitrary binary payloads: JSON requests and rendered patches are UTF-8.

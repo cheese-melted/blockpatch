@@ -1,10 +1,8 @@
 # blockpatch Spec
 
-This document defines the `.blockpatch` artifact format, move JSON request contract, and JSON output contract. The public API is the CLI and JSON output; TypeScript exports are internal.
+This document defines the `.blockpatch` artifact format, move JSON request contract, and JSON output contract. The public API is the CLI and its JSON output; there is no library API.
 
 For command forms, see [Commands](commands.md). For planning, matching, idempotence, and write behavior, see [Behavior](behavior.md).
-
-The header line `blockpatch version 1` is required syntax for the current `.blockpatch` format.
 
 ## Format
 
@@ -85,7 +83,9 @@ blockpatch move id=<id> role=target payload-sha256=<sha256>
 
 Format constraints:
 
+- Every file section must declare `blockpatch version 1` on the line after `diff --blockpatch`.
 - The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. The prefixes are consumed by the default `-p1` path stripping ([Commands](commands.md#paths-and-stripping)).
+- Patch-declared paths use POSIX-style `/` separators on every platform. Backslashes are rejected instead of normalized.
 - `blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
 - Source context before and after may each be empty.
 - Target hunks for existing files must include context on at least one side; either side may be empty, but not both.
@@ -207,8 +207,7 @@ Request shapes:
 - For insertion, set `src` to `/dev/null`; `dst`, `payload`, and target context are required.
 - For file creation, set `src` to `/dev/null`, set `mode` to `create_file`, and provide `dst` plus `payload`. Empty payload is valid and creates an empty file.
 - For file removal, set `dst` to `/dev/null` and set `mode` to `remove_file`. The whole source file is selected as the payload.
-- Without `mode`, `/dev/null` denotes the absent source or target hunk endpoint for in-file insertion/deletion; `move --diff` renders those as normal same-file one-sided patch sections.
-- Use `mode: "create_file"` or `mode: "remove_file"` for whole-file path creation/removal; `move --diff` renders those as `.blockpatch` documents with `/dev/null` file headers.
+- `mode` selects the whole-file path shapes; without it, `/dev/null` endpoints denote in-file insertion/deletion. `move --diff` renders the in-file shapes as same-file one-sided sections and the `mode` shapes with `/dev/null` file headers.
 - `target_before`, `target_after`, or both are required for relocation and insertion.
 - `payload` is only valid when `src` is `/dev/null`; it must be non-empty for in-file insertion.
 - `expected_payload_sha256` is optional.
@@ -305,13 +304,14 @@ type BlockPatchJsonError = {
     phase?: string
     anchor?: string
     matches?: number
+    matches_truncated?: boolean
     ranges?: Array<{ start: number; end: number }>
     line_ranges?: Array<{ start: number; end: number }>
   }
 }
 ```
 
-Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. They do not include source snippets, fuzzy suggestions, or repair guidance.
+Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. When `matches_truncated` is true, `matches` is a lower bound rather than an exact count. They do not include source snippets, fuzzy suggestions, or repair guidance.
 
 Error codes are the agent-facing branch contract: branch on `error.code`, not on human-readable messages. Removing a code or changing its meaning is semver-major.
 
@@ -330,6 +330,7 @@ type BlockPatchErrorCode =
   | "target_not_found"
   | "target_ambiguous"
   | "destination_exists"
+  | "concurrent_modification"
   | "payload_mismatch"
   | "hash_mismatch"
   | "invalid_utf8"

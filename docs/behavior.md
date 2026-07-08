@@ -26,6 +26,7 @@ Rejected operation paths include:
 
 - absolute paths
 - `..` escapes
+- backslashes; operation paths use POSIX-style `/` separators in `.blockpatch` artifacts and move JSON
 - paths containing symlink components
 - existing regular files whose real path escapes `--cwd`
 
@@ -147,9 +148,7 @@ target context before + payload + target context after
 
 is present exactly once.
 
-For target-only insertion, the target payload is already between the target anchors.
-
-For source-only deletion, idempotence is proven when both source anchors are adjacent, when the remaining after anchor is at the start of the file, when the remaining before anchor is at the end of the file, or when an anchorless payload is absent.
+For one-sided and null-endpoint shapes, the `already_applied` conditions are listed per shape in [One-Sided And Null-Endpoint Behavior](#one-sided-and-null-endpoint-behavior).
 
 This is strict retry idempotence. It does not search fuzzily or infer moved bytes.
 
@@ -162,6 +161,8 @@ Reverse application is exact and non-fuzzy. A payload-only source hunk has no so
 ## Write Behavior
 
 Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files and stage all changed temp files before renaming any original. If staging fails, originals are left untouched.
+
+Before renaming or removing a path, `blockpatch` re-checks that every existing file still matches the bytes and stat captured during planning. For path creation, it re-checks that the destination is still absent or already contains the exact expected bytes. If the live path no longer matches the verified input state, the operation fails with `concurrent_modification`.
 
 Once renames begin, a two-file operation is not transactional. The destination is renamed before the source, so an interruption can duplicate the payload, but should not delete it from both files. Atomic here means per-file replacement, not a crash-durable multi-file transaction.
 
@@ -186,6 +187,7 @@ Once renames begin, a two-file operation is not transactional. The destination i
 - the target anchor is missing
 - the target anchor is ambiguous
 - the target anchor overlaps the source payload
+- a file changes after `blockpatch` verifies it but before the planned write/remove
 - file I/O fails before a write completes
 
 ## Intentionally Out Of Scope
