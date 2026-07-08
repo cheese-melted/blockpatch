@@ -100,16 +100,6 @@ blockpatch move --json -
 
 When using `--cwd`, operation paths inside patches and move JSON are relative to `--cwd`; input patch and move JSON filenames are normal CLI paths, relative to your shell working directory unless absolute.
 
-## Development
-
-```sh
-bun install
-bun test
-bun run build
-npm run pack:dry
-node dist/cli.js version
-```
-
 ## Docs
 
 - [Patch spec](docs/spec.md): canonical `.blockpatch` syntax, grammar, one-sided hunks, `/dev/null`, semantics, byte rules, and scope.
