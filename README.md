@@ -29,7 +29,7 @@ npx blockpatch --help
 3. Apply the reviewed patch with `blockpatch apply`.
 4. Retry the `.blockpatch`, not the original JSON request.
 
-Example:
+Example: move `movedThing` from `src/foo.ts` into `src/bar.ts`, starting from this tree:
 
 ```ts
 // before: src/foo.ts
@@ -45,23 +45,7 @@ export function movedThing() {
 export const target = "here";
 ```
 
-```ts
-// after: src/foo.ts
-export function keepThing() {
-  return 7;
-}
-
-// after: src/bar.ts
-export const target = "here";
-
-export function movedThing() {
-  return 42;
-}
-```
-
-The JSON request selects the source bytes and target anchors. The returned `.blockpatch` carries the exact payload and hash, so retries validate the final state without asking the agent to reselect bytes from a changed tree.
-
-Ask `blockpatch` to plan a byte-exact move from JSON and save the JSON envelope:
+The JSON request selects the source bytes and target anchors. Ask `blockpatch` to plan the byte-exact move and save the JSON envelope:
 
 ```sh
 blockpatch plan --json - <<'JSON' > plan.json
@@ -103,13 +87,35 @@ JSON
 
 `plan` validates the source delimiters and target anchors, computes byte ranges, hashes the selected payload, renders a reviewable `.blockpatch`, self-checks that patch against the current tree in memory, and returns the patch in JSON without writing.
 
-Review the returned `patch` string, save it as a `.blockpatch`, then validate and apply that artifact explicitly:
+Review the returned `patch` string, save it as a `.blockpatch`, then apply that artifact explicitly:
 
 ```sh
 jq -r .patch plan.json > patch.blockpatch
-blockpatch check patch.blockpatch
 blockpatch apply patch.blockpatch
 ```
+
+```
+changed src/foo.ts
+changed src/bar.ts
+```
+
+`apply` re-verifies the artifact against the current tree — the payload hash must match and the source block and target anchors must each match exactly once — then replaces both files atomically. The tree now matches the requested final state:
+
+```ts
+// after: src/foo.ts
+export function keepThing() {
+  return 7;
+}
+
+// after: src/bar.ts
+export const target = "here";
+
+export function movedThing() {
+  return 42;
+}
+```
+
+Retrying the same `patch.blockpatch` against this tree reports `already_applied`: the artifact carries the exact payload and hash, so it validates the final state without asking the agent to reselect bytes from a changed tree.
 
 The same JSON planning handshake covers whole-file path creation and removal with explicit `mode: "create_file"` and `mode: "remove_file"` requests; the returned review artifact uses strict `/dev/null` file headers.
 
