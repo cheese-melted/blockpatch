@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { fail } from "./errors";
+import { rejectUnsafeDisplayPath } from "./paths";
 import type { BlockPatch, TargetAnchor } from "./types";
 
 interface PatchLine {
@@ -571,14 +572,18 @@ function parseFileHeader(
   requiredPathPrefix: "a/" | "b/"
 ): string {
   const marker = `${prefix} `;
-  if (line !== undefined && line.slice(marker.length).trim() === devNull && line.startsWith(marker)) {
+  const rawPath = line?.startsWith(marker) === true ? line.slice(marker.length) : undefined;
+  if (rawPath !== undefined) {
+    rejectUnsafeDisplayPath(rawPath, `${prefix} file header path`);
+  }
+  if (rawPath?.trim() === devNull && line?.startsWith(marker)) {
     return devNull;
   }
   if (line?.startsWith(`${marker}${requiredPathPrefix}`) !== true) {
     fail("parse_error", `Patch must include a ${marker}${requiredPathPrefix}<path> or ${marker}${devNull} header`);
   }
 
-  const path = line.slice(marker.length).trim();
+  const path = rawPath?.trim() ?? "";
   if (!path || path === requiredPathPrefix) {
     fail("parse_error", `${prefix} file header must include a path`);
   }

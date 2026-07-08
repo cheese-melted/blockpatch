@@ -267,6 +267,33 @@ describe("moveBlock API", () => {
     ).rejects.toThrow("Invalid source path");
   });
 
+  test("rejects display control characters in paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-control-path-"));
+    await expect(
+      moveBlock(
+        {
+          src: "source.ts\n.txt",
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("source path contains unsupported control characters");
+
+    await expect(
+      moveBlock(
+        {
+          src: "/dev/null",
+          dst: "target\t.ts",
+          payload: "inserted\n",
+          target_before: "anchor\n"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("destination path contains unsupported control characters");
+  });
+
   test("rejects symlink src paths", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-symlink-"));
     const realPath = join(cwd, "real.ts");

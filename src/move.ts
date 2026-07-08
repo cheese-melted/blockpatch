@@ -19,7 +19,7 @@ import {
   type MoveSelection
 } from "./engine";
 import { devNull } from "./parser";
-import { resolvePath, sameFileIdentity } from "./paths";
+import { resolvePath, sameFileIdentity, validateOperationPath } from "./paths";
 import type { MoveBlockArgs, MoveBlockOptions, MoveBlockResult } from "./types";
 
 interface NormalizedRelocationArgs {
@@ -193,6 +193,12 @@ export function validateMoveArgs(value: unknown): MoveBlockArgs {
 function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
   if (!args.src) {
     fail("invalid_move_args", "move requires src", { field: "src" });
+  }
+  if (args.src !== devNull) {
+    validateOperationPath(args.src, "source path");
+  }
+  if (args.dst !== undefined && args.dst !== devNull) {
+    validateOperationPath(args.dst, "destination path");
   }
 
   if (args.mode === "create_file") {

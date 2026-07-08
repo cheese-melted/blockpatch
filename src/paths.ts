@@ -3,10 +3,24 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fail } from "./errors";
 import { assertRegularFile, failFileSystem, lstatSyncChecked, realpathSyncChecked, statChecked } from "./files";
 
-export function resolvePath(cwd: string, path: string, label: string): string {
+export function validateOperationPath(path: string, label: string): void {
   if (path === "" || path.includes("\0")) {
     fail("invalid_path", `Invalid ${label}: ${path}`, { path, phase: "path" });
   }
+  rejectUnsafeDisplayPath(path, label);
+}
+
+export function rejectUnsafeDisplayPath(path: string, label: string): void {
+  if (/[\r\n\t]/.test(path)) {
+    fail("invalid_path", `${label} contains unsupported control characters: ${path}`, {
+      path,
+      phase: "path"
+    });
+  }
+}
+
+export function resolvePath(cwd: string, path: string, label: string): string {
+  validateOperationPath(path, label);
   if (isAbsolute(path)) {
     fail("path_outside_cwd", `${label} must be relative to the working directory: ${path}`, {
       path,
@@ -40,9 +54,7 @@ export function resolvePathAllowMissing(
   path: string,
   label: string
 ): { path: string; exists: boolean } {
-  if (path === "" || path.includes("\0")) {
-    fail("invalid_path", `Invalid ${label}: ${path}`, { path, phase: "path" });
-  }
+  validateOperationPath(path, label);
   if (isAbsolute(path)) {
     fail("path_outside_cwd", `${label} must be relative to the working directory: ${path}`, {
       path,
