@@ -16,7 +16,7 @@ blockpatch move --json -
 
 `plan --json -` is the canonical planning handshake. It is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. The explicit `move --json - --diff --json-output` form remains supported.
 
-`move --json --diff` is a planner for the current tree. For relocation and deletion, the JSON request selects the payload from the current source file; if that source block is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion JSON is the exception because it includes `payload` directly.
+`move --json --diff` is a planner for the current tree. For relocation, in-file deletion, and whole-file removal, the JSON request selects the payload from the current source file; if that source block or file is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion and `create_file` JSON are the exceptions because they include `payload` directly.
 
 A typical flow is: propose a move as JSON, let `blockpatch` validate and render the exact patch, show that patch to the user, then apply the `.blockpatch` in a second explicit step. Retry the `.blockpatch`, not the source-selected JSON plan.
 
@@ -49,16 +49,20 @@ type MoveBlockArgs = {
   target_before?: string
   target_after?: string
   expected_payload_sha256?: string
+  mode?: "create_file" | "remove_file"
   dry_run?: boolean
 }
 ```
 
 Rules:
 
-- In `move --json`, `/dev/null` denotes the absent source or target hunk endpoint for in-file insertion/deletion; `move --diff` renders those as normal same-file one-sided patch sections. Whole-file path creation/removal is expressed directly as `.blockpatch` documents with `/dev/null` file headers.
+- Without `mode`, `/dev/null` denotes the absent source or target hunk endpoint for in-file insertion/deletion; `move --diff` renders those as normal same-file one-sided patch sections.
+- Use `mode: "create_file"` or `mode: "remove_file"` for whole-file path creation/removal; `move --diff` renders those as `.blockpatch` documents with `/dev/null` file headers.
 - For relocation, `src_start` and `src_end` are inclusive source delimiters; `dst` defaults to `src`.
 - For deletion, set `dst` to `/dev/null`; `src_start` and `src_end` select the removed payload.
 - For insertion, set `src` to `/dev/null`; `dst`, `payload`, and target context are required.
+- For file creation, set `src` to `/dev/null`, set `mode` to `create_file`, and provide `dst` plus `payload`. Empty payload is valid and creates an empty file.
+- For file removal, set `dst` to `/dev/null` and set `mode` to `remove_file`. The whole source file is selected as the payload.
 - `target_before`, `target_after`, or both are required for relocation and insertion.
 - insertion is between the before and after contexts, and their concatenation must match exactly once.
 - if only `target_before` is supplied, insertion is immediately after that context.
@@ -90,6 +94,28 @@ Deletion:
   "src_start": "function removeMe() {\n",
   "src_end": "}\n",
   "dst": "/dev/null"
+}
+```
+
+File creation:
+
+```json
+{
+  "src": "/dev/null",
+  "dst": "src/new.ts",
+  "payload": "export const x = 1;\n",
+  "mode": "create_file"
+}
+```
+
+File removal:
+
+```json
+{
+  "src": "src/old.ts",
+  "dst": "/dev/null",
+  "mode": "remove_file",
+  "expected_payload_sha256": "<sha256>"
 }
 ```
 

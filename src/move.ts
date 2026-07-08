@@ -4,6 +4,7 @@ import { TextDecoder } from "node:util";
 import { boundedLineRanges, boundedRanges, fail } from "./errors";
 import { readFileChecked } from "./files";
 import {
+  applyPatchBytes,
   buildMoveSelection,
   checkPatchBytesInMemory,
   commitMove,
@@ -48,7 +49,25 @@ interface NormalizedDeletionArgs {
   dst: typeof devNull;
 }
 
-type NormalizedMoveBlockArgs = NormalizedRelocationArgs | NormalizedInsertionArgs | NormalizedDeletionArgs;
+interface NormalizedFileCreationArgs {
+  kind: "create_file";
+  src: typeof devNull;
+  dst: string;
+  payload: Buffer;
+}
+
+interface NormalizedFileRemovalArgs {
+  kind: "remove_file";
+  src: string;
+  dst: typeof devNull;
+}
+
+type NormalizedMoveBlockArgs =
+  | NormalizedRelocationArgs
+  | NormalizedInsertionArgs
+  | NormalizedDeletionArgs
+  | NormalizedFileCreationArgs
+  | NormalizedFileRemovalArgs;
 
 const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   src: "string",
@@ -59,8 +78,10 @@ const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   target_before: "string",
   target_after: "string",
   expected_payload_sha256: "string",
+  mode: "string",
   dry_run: "boolean"
 };
+const moveModes = new Set(["create_file", "remove_file"]);
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export async function moveBlock(
@@ -71,6 +92,12 @@ export async function moveBlock(
   const normalized = normalizeArgs(validated);
   const cwd = options.cwd ?? process.cwd();
   const dryRun = options.dryRun ?? validated.dry_run ?? false;
+  if (normalized.kind === "create_file") {
+    return createFile(normalized, validated, cwd, dryRun, options);
+  }
+  if (normalized.kind === "remove_file") {
+    return removeFile(normalized, validated, cwd, dryRun, options);
+  }
   if (normalized.kind === "insertion") {
     return insertPayload(normalized, validated, cwd, dryRun, options);
   }
@@ -156,6 +183,9 @@ export function validateMoveArgs(value: unknown): MoveBlockArgs {
       field: "expected_payload_sha256"
     });
   }
+  if (args.mode !== undefined && !moveModes.has(args.mode)) {
+    fail("invalid_move_args", "mode must be create_file or remove_file", { field: "mode" });
+  }
 
   return args;
 }
@@ -163,6 +193,13 @@ export function validateMoveArgs(value: unknown): MoveBlockArgs {
 function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
   if (!args.src) {
     fail("invalid_move_args", "move requires src", { field: "src" });
+  }
+
+  if (args.mode === "create_file") {
+    return normalizeFileCreationArgs(args);
+  }
+  if (args.mode === "remove_file") {
+    return normalizeFileRemovalArgs(args);
   }
 
   const dst = args.dst ?? args.src;
@@ -231,6 +268,66 @@ function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
   };
 }
 
+function normalizeFileCreationArgs(args: MoveBlockArgs): NormalizedFileCreationArgs {
+  if (args.src !== devNull) {
+    fail("invalid_move_args", "create_file mode requires src to be /dev/null", { field: "src" });
+  }
+  if (args.dst === undefined) {
+    fail("invalid_move_args", "create_file mode requires dst", { field: "dst" });
+  }
+  if (args.dst === devNull) {
+    fail("invalid_move_args", "create_file mode cannot target /dev/null", { field: "dst" });
+  }
+  if (args.payload === undefined) {
+    fail("invalid_move_args", "create_file mode requires payload", { field: "payload" });
+  }
+  rejectSourceSelectionArgs(args, "create_file mode uses payload as the whole-file content");
+  rejectTargetAnchorArgs(args, "create_file mode must not include target anchors");
+
+  return {
+    kind: "create_file",
+    src: devNull,
+    dst: args.dst,
+    payload: Buffer.from(args.payload, "utf8")
+  };
+}
+
+function normalizeFileRemovalArgs(args: MoveBlockArgs): NormalizedFileRemovalArgs {
+  if (args.src === devNull) {
+    fail("invalid_move_args", "remove_file mode requires a real src path", { field: "src" });
+  }
+  if (args.dst !== devNull) {
+    fail("invalid_move_args", "remove_file mode requires dst to be /dev/null", { field: "dst" });
+  }
+  if (args.payload !== undefined) {
+    fail("invalid_move_args", "remove_file mode reads the whole-file payload from src", { field: "payload" });
+  }
+  rejectSourceSelectionArgs(args, "remove_file mode removes the whole src file");
+  rejectTargetAnchorArgs(args, "remove_file mode must not include target anchors");
+
+  return {
+    kind: "remove_file",
+    src: args.src,
+    dst: devNull
+  };
+}
+
+function rejectSourceSelectionArgs(args: MoveBlockArgs, message: string): void {
+  if (args.src_start !== undefined || args.src_end !== undefined) {
+    fail("invalid_move_args", message, {
+      field: args.src_start !== undefined ? "src_start" : "src_end"
+    });
+  }
+}
+
+function rejectTargetAnchorArgs(args: MoveBlockArgs, message: string): void {
+  if (args.target_before !== undefined || args.target_after !== undefined) {
+    fail("invalid_move_args", message, {
+      field: args.target_before !== undefined ? "target_before" : "target_after"
+    });
+  }
+}
+
 function normalizeTargetArgs(args: MoveBlockArgs): { before: Buffer; after: Buffer } {
   const hasTargetBefore = args.target_before !== undefined;
   const hasTargetAfter = args.target_after !== undefined;
@@ -254,6 +351,48 @@ function requiredBuffer(value: string | undefined, field: "src_start" | "src_end
     fail("invalid_move_args", `move requires ${field}`, { field });
   }
   return Buffer.from(value, "utf8");
+}
+
+async function createFile(
+  args: NormalizedFileCreationArgs,
+  validated: MoveBlockArgs,
+  cwd: string,
+  dryRun: boolean,
+  options: MoveBlockOptions
+): Promise<MoveBlockResult> {
+  const payloadSha256 = createHash("sha256").update(args.payload).digest("hex");
+  verifyExpectedPayloadHash(validated, payloadSha256);
+  const patch = renderFileCreationPatch(args, payloadSha256);
+  return runRenderedPatch(patch, cwd, dryRun, options);
+}
+
+async function removeFile(
+  args: NormalizedFileRemovalArgs,
+  validated: MoveBlockArgs,
+  cwd: string,
+  dryRun: boolean,
+  options: MoveBlockOptions
+): Promise<MoveBlockResult> {
+  const srcPath = resolvePath(cwd, args.src, "source path");
+  const payload = await readFileChecked(srcPath, "source file");
+  const payloadSha256 = createHash("sha256").update(payload).digest("hex");
+  verifyExpectedPayloadHash(validated, payloadSha256);
+  const patch = renderFileRemovalPatch(args, payload, payloadSha256);
+  return runRenderedPatch(patch, cwd, dryRun, options);
+}
+
+async function runRenderedPatch(
+  patch: string,
+  cwd: string,
+  dryRun: boolean,
+  options: MoveBlockOptions
+): Promise<MoveBlockResult> {
+  const writeSuppressed = dryRun || options.diff === true;
+  const result = await applyPatchBytes(Buffer.from(patch, "utf8"), { cwd, dryRun: writeSuppressed });
+  return {
+    ...result,
+    patch: options.diff === true ? patch : undefined
+  };
 }
 
 async function insertPayload(
@@ -647,6 +786,44 @@ function renderDeletionPatch(
     `+++ b/${args.src}`,
     "",
     `@@ -${sourceOldStart},${sourceOldCount} +${sourceOldStart},${sourceNewCount} @@ blockpatch-source id=${id}`,
+    sourceBody
+  ].join("\n") + "\n";
+}
+
+function renderFileCreationPatch(args: NormalizedFileCreationArgs, payloadSha256: string): string {
+  const id = "move-1";
+  const payloadLines = countLines(args.payload);
+  const targetBody = renderHunkBytes(args.payload, "+");
+
+  return [
+    `diff --blockpatch ${devNull} b/${args.dst}`,
+    "blockpatch version 1",
+    `blockpatch move id=${id} payload-sha256=${payloadSha256}`,
+    `--- ${devNull}`,
+    `+++ b/${args.dst}`,
+    "",
+    `@@ -0,0 +${payloadLines === 0 ? "0,0" : `1,${payloadLines}`} @@ blockpatch-target id=${id}`,
+    targetBody
+  ].join("\n") + "\n";
+}
+
+function renderFileRemovalPatch(
+  args: NormalizedFileRemovalArgs,
+  payload: Buffer,
+  payloadSha256: string
+): string {
+  const id = "move-1";
+  const payloadLines = countLines(payload);
+  const sourceBody = renderHunkBytes(payload, "-");
+
+  return [
+    `diff --blockpatch a/${args.src} ${devNull}`,
+    "blockpatch version 1",
+    `blockpatch move id=${id} payload-sha256=${payloadSha256}`,
+    `--- a/${args.src}`,
+    `+++ ${devNull}`,
+    "",
+    `@@ -${payloadLines === 0 ? "0,0" : `1,${payloadLines}`} +0,0 @@ blockpatch-source id=${id}`,
     sourceBody
   ].join("\n") + "\n";
 }

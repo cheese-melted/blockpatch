@@ -2,11 +2,15 @@ import { lstat, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { applyPatchFile } from "../src/engine";
 import { moveBlock } from "../src/move";
 import { BlockPatchError } from "../src/errors";
 import {
+  expectMissing,
   hardlinkOrSkip,
   moveFixture,
+  pathExists,
+  shaText,
   symlinkOrSkip
 } from "./helpers";
 
@@ -327,6 +331,119 @@ describe("moveBlock API", () => {
     expect(result.written).toBe(false);
     expect(await readFile(join(cwd, "source.ts"))).toEqual(Buffer.from("before\nx\r", "utf8"));
     expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe("target\n");
+  });
+
+  test("create_file mode renders a whole-file /dev/null creation patch", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-file-json-"));
+    const result = await moveBlock(
+      {
+        src: "/dev/null",
+        dst: "src/new.ts",
+        payload: "export const x = 1;\n",
+        mode: "create_file"
+      },
+      { cwd, diff: true }
+    );
+
+    expect(result).toMatchObject({
+      changed: ["src/new.ts"],
+      affected: ["src/new.ts"],
+      written: false,
+      status: "applied"
+    });
+    expect(result.moves[0]).toMatchObject({
+      src: "/dev/null",
+      dst: "src/new.ts",
+      source_range: null,
+      target_range: { start: 0, end: 0 },
+      insert_index: 0
+    });
+    expect(result.patch).toContain("diff --blockpatch /dev/null b/src/new.ts");
+    expect(result.patch).toContain("--- /dev/null");
+    expect(result.patch).toContain("+++ b/src/new.ts");
+    expect(result.patch).toContain("@@ -0,0 +1,1 @@ blockpatch-target id=move-1");
+    expect(result.patch).toContain("+export const x = 1;");
+    expect(await pathExists(join(cwd, "src/new.ts"))).toBe(false);
+
+    await writeFile(join(cwd, "generated.blockpatch"), result.patch ?? "");
+    await applyPatchFile("generated.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "src/new.ts"), "utf8")).toBe("export const x = 1;\n");
+  });
+
+  test("create_file mode accepts an empty whole-file payload", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-file-empty-json-"));
+    const result = await moveBlock(
+      {
+        src: "/dev/null",
+        dst: "empty.txt",
+        payload: "",
+        mode: "create_file"
+      },
+      { cwd }
+    );
+
+    expect(result.changed).toEqual(["empty.txt"]);
+    expect(result.written).toBe(true);
+    expect(await readFile(join(cwd, "empty.txt"), "utf8")).toBe("");
+  });
+
+  test("remove_file mode renders a whole-file /dev/null removal patch", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-remove-file-json-"));
+    await writeFile(join(cwd, "old.ts"), "export const old = true;\n");
+    const payloadSha256 = shaText("export const old = true;\n");
+
+    const result = await moveBlock(
+      {
+        src: "old.ts",
+        dst: "/dev/null",
+        mode: "remove_file",
+        expected_payload_sha256: payloadSha256
+      },
+      { cwd, diff: true }
+    );
+
+    expect(result).toMatchObject({
+      changed: ["old.ts"],
+      affected: ["old.ts"],
+      written: false,
+      status: "applied"
+    });
+    expect(result.moves[0]).toMatchObject({
+      src: "old.ts",
+      dst: "/dev/null",
+      payload_sha256: payloadSha256,
+      source_range: { start: 0, end: "export const old = true;\n".length },
+      target_range: null,
+      insert_index: null
+    });
+    expect(result.patch).toContain("diff --blockpatch a/old.ts /dev/null");
+    expect(result.patch).toContain("--- a/old.ts");
+    expect(result.patch).toContain("+++ /dev/null");
+    expect(result.patch).toContain("@@ -1,1 +0,0 @@ blockpatch-source id=move-1");
+    expect(result.patch).toContain("-export const old = true;");
+    expect(await readFile(join(cwd, "old.ts"), "utf8")).toBe("export const old = true;\n");
+
+    await writeFile(join(cwd, "generated.blockpatch"), result.patch ?? "");
+    await applyPatchFile("generated.blockpatch", { cwd });
+    await expectMissing(join(cwd, "old.ts"));
+  });
+
+  test("remove_file mode rejects expected payload hash mismatches", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-remove-file-json-hash-"));
+    await writeFile(join(cwd, "old.ts"), "export const old = true;\n");
+
+    await expect(
+      moveBlock(
+        {
+          src: "old.ts",
+          dst: "/dev/null",
+          mode: "remove_file",
+          expected_payload_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        { cwd, diff: true }
+      )
+    ).rejects.toThrow("expected_payload_sha256 does not match selected source payload");
+    expect(await readFile(join(cwd, "old.ts"), "utf8")).toBe("export const old = true;\n");
   });
 
   test("move --diff rejects invalid UTF-8 payload bytes", async () => {

@@ -62,6 +62,7 @@ export interface MoveBlockArgs {
   target_before?: string;
   target_after?: string;
   expected_payload_sha256?: string;
+  mode?: "create_file" | "remove_file";
   dry_run?: boolean;
 }
 

@@ -8,7 +8,9 @@ import { moveBlock } from "../src/move";
 import {
   fixtureCase,
   fixtureRoot,
-  moveFixture
+  moveFixture,
+  pathExists,
+  shaText
 } from "./helpers";
 
 describe("CLI", () => {
@@ -692,6 +694,93 @@ describe("CLI", () => {
     expect(stdout.patch).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
     expect(stdout.patch).toContain("@@ -6,2 +3,5 @@ blockpatch-target id=move-1");
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
+  test("plan --json supports whole-file creation mode", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-plan-create-file-"));
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "plan", "--json", "-", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "/dev/null",
+        dst: "src/new.ts",
+        payload: "export const x = 1;\n",
+        mode: "create_file"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      written: boolean;
+      patch: string;
+      moves: Array<{ src: string; dst: string; payload_sha256: string; source_range: null }>;
+    };
+    expect(stdout).toMatchObject({
+      ok: true,
+      changed: ["src/new.ts"],
+      written: false
+    });
+    expect(stdout.moves[0]).toMatchObject({
+      src: "/dev/null",
+      dst: "src/new.ts",
+      payload_sha256: shaText("export const x = 1;\n"),
+      source_range: null
+    });
+    expect(stdout.patch).toContain("diff --blockpatch /dev/null b/src/new.ts");
+    expect(stdout.patch).toContain("@@ -0,0 +1,1 @@ blockpatch-target id=move-1");
+    expect(await pathExists(join(cwd, "src/new.ts"))).toBe(false);
+  });
+
+  test("plan --json supports whole-file removal mode", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-plan-remove-file-"));
+    await writeFile(join(cwd, "old.ts"), "export const old = true;\n");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "plan", "--json", "-", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "old.ts",
+        dst: "/dev/null",
+        mode: "remove_file",
+        expected_payload_sha256: shaText("export const old = true;\n")
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      changed: string[];
+      written: boolean;
+      patch: string;
+      moves: Array<{ src: string; dst: string; payload_sha256: string; target_range: null }>;
+    };
+    expect(stdout).toMatchObject({
+      ok: true,
+      changed: ["old.ts"],
+      written: false
+    });
+    expect(stdout.moves[0]).toMatchObject({
+      src: "old.ts",
+      dst: "/dev/null",
+      payload_sha256: shaText("export const old = true;\n"),
+      target_range: null
+    });
+    expect(stdout.patch).toContain("diff --blockpatch a/old.ts /dev/null");
+    expect(stdout.patch).toContain("@@ -1,1 +0,0 @@ blockpatch-source id=move-1");
+    expect(await readFile(join(cwd, "old.ts"), "utf8")).toBe("export const old = true;\n");
   });
 
   test("plan errors are JSON by default", async () => {

@@ -94,6 +94,8 @@ blockpatch apply patch.blockpatch --dry-run
 blockpatch apply patch.blockpatch
 ```
 
+The same JSON planning handshake covers whole-file path creation and removal with explicit `mode: "create_file"` and `mode: "remove_file"` requests; the returned review artifact uses strict `/dev/null` file headers.
+
 ## Common Commands
 
 ```sh
