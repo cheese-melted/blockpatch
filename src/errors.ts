@@ -23,7 +23,6 @@ export type BlockPatchErrorCode =
   | "hash_mismatch"
   | "invalid_utf8"
   | "target_overlaps_source"
-  | "already_applied"
   | "invalid_move_args"
   | "invalid_json"
   | "missing_move_args"

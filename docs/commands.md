@@ -1,6 +1,8 @@
-# Agent Protocol
+# blockpatch Commands
 
-This document describes the command and JSON contracts intended for agents and other tooling. The public API is the CLI and JSON output; TypeScript exports are internal.
+This document describes the CLI forms, move JSON, JSON output, and error codes intended for agents and other tooling. The public API is the CLI and JSON output; TypeScript exports are internal.
+
+For the `.blockpatch` artifact format, see [Patch spec](spec.md). For matching, idempotence, and write guarantees, see [Behavior](behavior.md).
 
 ## Common Commands
 
@@ -58,7 +60,7 @@ Rules:
 
 - Without `mode`, `/dev/null` denotes the absent source or target hunk endpoint for in-file insertion/deletion; `move --diff` renders those as normal same-file one-sided patch sections.
 - Use `mode: "create_file"` or `mode: "remove_file"` for whole-file path creation/removal; `move --diff` renders those as `.blockpatch` documents with `/dev/null` file headers.
-- For relocation, `src_start` and `src_end` are inclusive source delimiters; `dst` defaults to `src`.
+- For relocation, `src_start` and `src_end` are inclusive source delimiters; each `src_start` match pairs with the first `src_end` occurrence after it, and `dst` defaults to `src`.
 - For deletion, set `dst` to `/dev/null`; `src_start` and `src_end` select the removed payload.
 - For insertion, set `src` to `/dev/null`; `dst`, `payload`, and target context are required.
 - For file creation, set `src` to `/dev/null`, set `mode` to `create_file`, and provide `dst` plus `payload`. Empty payload is valid and creates an empty file.
@@ -200,7 +202,6 @@ type BlockPatchErrorCode =
   | "hash_mismatch"
   | "invalid_utf8"
   | "target_overlaps_source"
-  | "already_applied"
   | "invalid_move_args"
   | "invalid_json"
   | "missing_move_args"

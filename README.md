@@ -124,9 +124,9 @@ When using `--cwd`, operation paths inside patches and move JSON are relative to
 
 ## Docs
 
-- [Patch spec](docs/spec.md): canonical `.blockpatch` syntax, grammar, one-sided hunks, `/dev/null`, semantics, byte rules, and scope.
-- [Agent protocol](docs/agent-protocol.md): command forms, move JSON, JSON output, and error codes.
-- [Safety model](docs/safety-model.md): exact matching, path containment, idempotence, failure rules, and write behavior.
+- [Commands](docs/commands.md): CLI forms, move JSON, JSON output, and error codes.
+- [Patch spec](docs/spec.md): canonical `.blockpatch` artifact format, hunk syntax, `/dev/null`, byte rules, and format scope.
+- [Behavior](docs/behavior.md): exact matching, idempotence, path containment, failure rules, and write behavior.
 
 ## Examples
 

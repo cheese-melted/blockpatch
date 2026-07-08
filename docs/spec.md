@@ -176,67 +176,7 @@ The section shapes and their meaning:
 
 The key distinction is that an empty file is a real endpoint while `/dev/null` is the null endpoint. A missing file is an error unless the patch explicitly says `/dev/null`; missing files never silently resolve as empty files.
 
-## One-Sided Rules
-
-Rules for target-only insertion into an existing file:
-
-- the section contains exactly one `blockpatch-target` hunk and no source hunk.
-- the payload comes from the `+` lines and must match `payload-sha256`.
-- the file must exist; missing files are not treated as empty files.
-- `target context before + target context after` must match exactly once; the payload is inserted at the boundary.
-- at least one side of target context is required, so arbitrary zero-byte in-file insertions are not valid.
-- if `target before + payload + target after` is already present exactly once, the result is `already_applied`.
-
-Rules for source-only deletion from an existing file:
-
-- the section contains exactly one `blockpatch-source` hunk and no target hunk.
-- the file must exist; missing files are not treated as empty files.
-- `source context before + payload + source context after` must match exactly once; the payload bytes are removed.
-- if removal leaves zero bytes, the file remains as an empty file.
-- retries are idempotent when both source anchors are adjacent, when the remaining after anchor is at the start of the file, when the remaining before anchor is at the end of the file, or when an anchorless payload is absent.
-
-Rules for `/dev/null -> file` creation:
-
-- the section contains exactly one `blockpatch-target` hunk and no source hunk.
-- the target hunk must be whole-file payload: only contiguous `+` payload lines, with no context lines.
-- zero-byte payload is valid and creates an empty file.
-- a missing destination is created, including parent directories; new files are created with mode 0644.
-- if the destination already exists with exactly the requested bytes, the result is `already_applied`; if it exists with different bytes, the patch fails.
-
-Rules for `file -> /dev/null` removal:
-
-- the section contains exactly one `blockpatch-source` hunk and no target hunk.
-- the source hunk must be whole-file payload: only contiguous `-` payload lines, with no context lines.
-- zero-byte payload is valid and removes an empty file.
-- the existing file bytes must exactly equal the source payload; then the path is removed.
-- if the source path is already missing, the result is `already_applied`.
-
-`-R`/`--reverse` swaps source and target hunk roles: reversing a target-only insertion deletes the inserted payload, reversing a source-only deletion re-inserts the payload, reversing a file creation removes the created file, and reversing a file removal recreates it.
-
-In JSON output, a target-only insertion has `source_range: null`, and a source-only deletion has `target_range: null` and `insert_index: null`. A null path endpoint is rendered as the string `/dev/null` in `src` or `dst`.
-
-## Semantics
-
-For one patch:
-
-1. Parse one same-file section with source+target, source-only, or target-only hunks; or parse two cross-file relocation sections tied by `role=source` and `role=target`.
-2. Verify hunk ids match `blockpatch move id=<id>`.
-3. Extract source payload from contiguous `-` lines when a source hunk exists.
-4. Extract target payload from contiguous `+` lines when a target hunk exists.
-5. For paired moves, verify target payload exactly equals source payload.
-6. Verify `payload-sha256` matches the exact moved or materialized payload bytes.
-7. For source hunks, locate exactly one source match for `source context before + payload + source context after`.
-8. For target hunks in existing files, locate exactly one target match for `target context before + target context after`.
-9. Fail if a same-file target context range overlaps the source payload bytes.
-10. Apply the hunk transition: remove source payload, insert target payload, or both.
-11. Apply any path-state transition from `/dev/null`: create the missing destination path or remove the source path.
-12. Write changed files with temp-file-and-rename replacement.
-
-If the requested final state is already present, `blockpatch` reports `already_applied`. For paired moves, that means the source full match is absent and `target context before + payload + target context after` is present exactly once. For target-only insertion, the target payload is already between the target anchors. For source-only deletion, both source anchors must be adjacent, the remaining after anchor must be at the start of the file, the remaining before anchor must be at the end of the file, or the anchorless payload must be absent. This is strict idempotence for retries; it does not search fuzzily or infer moved bytes.
-
-With `-R`/`--reverse`, `blockpatch` swaps hunk roles and path endpoints. Reverse application is exact and non-fuzzy. A payload-only source hunk has no source-side anchor for reverse insertion, so reverse requires source context before or after unless it is a whole-file path recreation.
-
-Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files and stage all changed temp files before renaming any original. If staging fails, originals are left untouched. Once renames begin, the two-file operation is still not transactional; the destination is renamed before the source so an interruption can duplicate the payload, but should not delete it from both files. Atomic here means per-file replacement, not a crash-durable multi-file transaction.
+Matching rules, idempotence, reverse application, and write behavior are documented in [Behavior](behavior.md).
 
 ## Byte Rules
 
