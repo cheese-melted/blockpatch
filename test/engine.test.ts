@@ -1181,7 +1181,7 @@ describe("one-sided hunks and null endpoints", () => {
     expect(await readFile(join(cwd, "src/deep/new.txt"), "utf8")).toBe("one\n");
   });
 
-  test("null source creates missing files with mode 0644", async () => {
+  test.skipIf(process.platform === "win32")("null source creates missing files with mode 0644", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-create-mode-"));
     await writeFile(join(cwd, "patch.blockpatch"), creationPatch("one\n"));
     const proc = Bun.spawn({
