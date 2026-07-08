@@ -5,9 +5,7 @@
 
 Cut/paste for agents: hash-verified block moves that read like unified diffs.
 
-The core invariant is simple: a move transfers one exact, hash-verified payload between endpoints. In a paired move, the source hunk removes exact bytes and the target hunk adds the same exact bytes, so `blockpatch` moves the original source bytes instead of regenerating them.
-
-`blockpatch` emits reviewable unified-diff-shaped patches that are intended to be compatible with `patch --fuzz=0` where possible. `blockpatch apply` accepts a strict, hash-verified subset of those patches and deliberately rejects fuzzy, heuristic, or ambiguous application.
+`blockpatch` emits reviewable unified-diff-shaped patches for exact, hash-verified payload moves. In a paired move, the source hunk removes exact bytes and the target hunk adds the same exact bytes, so `blockpatch` moves the original source bytes instead of regenerating them. Generated patches are intended to be compatible with `patch --fuzz=0` where possible, while `blockpatch apply` accepts a strict subset and deliberately rejects fuzzy, heuristic, or ambiguous application.
 
 ## Install
 
@@ -18,16 +16,14 @@ npx blockpatch --help
 
 ## Usage
 
-`blockpatch` is a deterministic move planner/apply layer for coding agents: agents describe the intended move as JSON, and users review the exact `.blockpatch` artifact before anything is written.
-
-The public API is the CLI and JSON output; TypeScript exports are internal.
+`blockpatch` is a deterministic move planner/apply layer for coding agents:
 
 1. Send a JSON move request to `blockpatch plan --json -`.
 2. Show the returned `.blockpatch` to the user for review.
 3. Apply the reviewed patch with `blockpatch apply`.
 4. Retry the `.blockpatch`, not the original JSON request.
 
-Tiny example:
+Example:
 
 ```ts
 // before: src/foo.ts

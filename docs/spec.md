@@ -33,6 +33,72 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
 
 Line numbers in hunk headers are review hints only. Application uses context and exact payload verification, not line numbers.
 
+Same-file moves, insertions, and deletions use one file section. In that shape, the `--- a/<path>` and `+++ b/<path>` headers must name the same file after normal path cleanup.
+
+```text
+diff --blockpatch a/<path> b/<path>
+blockpatch version 1
+blockpatch move id=<id> payload-sha256=<sha256>
+--- a/<path>
++++ b/<path>
+
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-source id=<id> optional label
+[ <source context before> ]
+-<moved payload>
+[ <source context after> ]
+
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-target id=<id> optional label
+[ <target context before> ]
++<same moved payload>
+[ <target context after> ]
+```
+
+For relocation, include both hunks and the target `+` payload must equal the source `-` payload. For source-only deletion, omit the target hunk. For target-only insertion, omit the source hunk and the payload comes from the target `+` lines.
+
+Cross-file moves use two conventional file sections tied by the same move id and payload hash: one `role=source` section for the source file and one `role=target` section for the target file. Each section's `---` and `+++` headers name the same file. This avoids the misleading patch shape where `--- a/source.ts` and `+++ b/target.ts` look like a transformation from one filename into another.
+
+```text
+diff --blockpatch a/<source-path> b/<source-path>
+blockpatch version 1
+blockpatch move id=<id> role=source payload-sha256=<sha256>
+--- a/<source-path>
++++ b/<source-path>
+
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-source id=<id> optional label
+[ <source context before> ]
+-<moved payload>
+[ <source context after> ]
+
+diff --blockpatch a/<target-path> b/<target-path>
+blockpatch version 1
+blockpatch move id=<id> role=target payload-sha256=<sha256>
+--- a/<target-path>
++++ b/<target-path>
+
+@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-target id=<id> optional label
+[ <target context before> ]
++<same moved payload>
+[ <target context after> ]
+```
+
+Format constraints:
+
+- The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping: `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
+- `blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
+- Source context before and after are exact byte anchors. Either side may be empty, and payload-only source hunks are allowed if the payload is unique.
+- Target hunks for existing files must include context on at least one side. `blockpatch` matches `target context before + target context after` exactly once in the destination file and inserts at `start + target context before.length`.
+- Either target side may be empty, but not both, unless the target hunk is a whole-file `/dev/null -> file` creation hunk.
+- The `-<old-start>,<old-count> +<new-start>,<new-count>` ranges are line-number hints for review, not match authority. `blockpatch` validates the line counts against the hunk body, but it locates changes by exact context and payload bytes.
+
+That means insertion occurs between target-before and target-after context:
+
+```diff
+@@ -40,2 +40,3 @@ blockpatch-target id=move-1
+ context before
++moved payload
+ context after
+```
+
 ## One-Sided Hunks And Null Endpoints
 
 Same-file sections may contain a source hunk and a target hunk, a source hunk only, or a target hunk only. One-sided hunks are for in-file insertion and deletion when the file exists both before and after the patch.
@@ -148,81 +214,6 @@ Rules for `file -> /dev/null` removal:
 `-R`/`--reverse` swaps source and target hunk roles: reversing a target-only insertion deletes the inserted payload, reversing a source-only deletion re-inserts the payload, reversing a file creation removes the created file, and reversing a file removal recreates it.
 
 In JSON output, a target-only insertion has `source_range: null`, and a source-only deletion has `target_range: null` and `insert_index: null`. A null path endpoint is rendered as the string `/dev/null` in `src` or `dst`.
-
-Same-file moves use one file section. In that shape, the `--- a/<path>` and `+++ b/<path>` headers must name the same file after normal path cleanup.
-
-Cross-file moves use two conventional file sections tied by the same move id and payload hash: one `role=source` section for the source file and one `role=target` section for the target file. Each section's `---` and `+++` headers name the same file. This avoids the misleading patch shape where `--- a/source.ts` and `+++ b/target.ts` look like a transformation from one filename into another.
-
-The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping: `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
-
-## Grammar
-
-Same-file move, insertion, or deletion:
-
-```text
-diff --blockpatch a/<path> b/<path>
-blockpatch version 1
-blockpatch move id=<id> payload-sha256=<sha256>
---- a/<path>
-+++ b/<path>
-
-@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-source id=<id> optional label
-[ <source context before> ]
--<moved payload>
-[ <source context after> ]
-
-@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-target id=<id> optional label
-[ <target context before> ]
-+<same moved payload>
-[ <target context after> ]
-```
-
-For relocation, include both hunks and the target `+` payload must equal the source `-` payload. For source-only deletion, omit the target hunk. For target-only insertion, omit the source hunk and the payload comes from the target `+` lines.
-
-Cross-file move:
-
-```text
-diff --blockpatch a/<source-path> b/<source-path>
-blockpatch version 1
-blockpatch move id=<id> role=source payload-sha256=<sha256>
---- a/<source-path>
-+++ b/<source-path>
-
-@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-source id=<id> optional label
-[ <source context before> ]
--<moved payload>
-[ <source context after> ]
-
-diff --blockpatch a/<target-path> b/<target-path>
-blockpatch version 1
-blockpatch move id=<id> role=target payload-sha256=<sha256>
---- a/<target-path>
-+++ b/<target-path>
-
-@@ -<old-start>,<old-count> +<new-start>,<new-count> @@ blockpatch-target id=<id> optional label
-[ <target context before> ]
-+<same moved payload>
-[ <target context after> ]
-```
-
-Source context before and after are exact byte anchors. Either side may be empty, and payload-only source hunks are allowed if the payload is unique. Target hunks for existing files must include context on at least one side.
-
-`blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
-
-The `-<old-start>,<old-count> +<new-start>,<new-count>` ranges are line-number hints for review, not match authority. `blockpatch` validates the line counts against the hunk body, but it locates changes by exact context and payload bytes.
-
-For target hunks in existing files, `blockpatch` matches `target context before + target context after` exactly once in the destination file and inserts at `start + target context before.length`.
-
-That means insertion occurs between target-before and target-after context:
-
-```diff
-@@ -40,2 +40,3 @@ blockpatch-target id=move-1
- context before
-+moved payload
- context after
-```
-
-Either target side may be empty, but not both, unless the target hunk is a whole-file `/dev/null -> file` creation hunk.
 
 ## Semantics
 
