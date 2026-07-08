@@ -11,6 +11,12 @@ Cut/paste for agents: hash-verified block moves that read like unified diffs.
 
 ```sh
 npm install -g blockpatch
+blockpatch --help
+```
+
+Or run without installing:
+
+```sh
 npx blockpatch --help
 ```
 
