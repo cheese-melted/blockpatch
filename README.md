@@ -1,6 +1,8 @@
 # blockpatch
 
-`blockpatch` applies anchored text block relocation patches that look like unified diffs i.e. cut paste for agents.
+tldr, cut paste for agents in the style of unified diffs.
+
+`blockpatch` applies anchored text block relocation patches that look like unified diffs.
 
 The core invariant is simple: a move transfers one exact, hash-verified payload between endpoints. In a paired move, the source hunk removes exact bytes and the target hunk adds the same exact bytes, so `blockpatch` moves the original source bytes instead of regenerating them.
 
