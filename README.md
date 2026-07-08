@@ -3,9 +3,7 @@
 [![CI](https://github.com/cheese-melted/blockpatch/actions/workflows/ci.yml/badge.svg)](https://github.com/cheese-melted/blockpatch/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/blockpatch.svg)](https://www.npmjs.com/package/blockpatch)
 
-Cut/paste for coding agents: hash-verified block moves that read like unified diffs.
-
-`blockpatch` applies anchored text block relocation patches that look like unified diffs.
+Cut/paste for agents: hash-verified block moves that read like unified diffs.
 
 The core invariant is simple: a move transfers one exact, hash-verified payload between endpoints. In a paired move, the source hunk removes exact bytes and the target hunk adds the same exact bytes, so `blockpatch` moves the original source bytes instead of regenerating them.
 
@@ -18,15 +16,7 @@ npm install -g blockpatch
 npx blockpatch --help
 ```
 
-## Quick Start
-
-```sh
-blockpatch plan --json -
-blockpatch apply patch.blockpatch --dry-run
-blockpatch apply patch.blockpatch
-```
-
-## For Coding Agents
+## Usage
 
 `blockpatch` is a deterministic move planner/apply layer for coding agents: agents describe the intended move as JSON, and users review the exact `.blockpatch` artifact before anything is written.
 
@@ -68,8 +58,6 @@ export function movedThing() {
 ```
 
 The JSON request selects the source bytes and target anchors. The returned `.blockpatch` carries the exact payload and hash, so retries validate the final state without asking the agent to reselect bytes from a changed tree.
-
-## 30-Second Demo
 
 Ask `blockpatch` to plan a byte-exact move from JSON:
 
