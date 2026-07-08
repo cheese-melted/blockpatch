@@ -27,38 +27,23 @@ For local development:
 bun install
 bun test
 bun run build
-npm run publish:dry
+npm run pack:dry
 node dist/cli.js version
 ```
 
-## Commands
+## Common Commands
 
 ```sh
 blockpatch check patch.blockpatch
-blockpatch apply patch.blockpatch
 blockpatch apply patch.blockpatch --dry-run
-blockpatch apply patch.blockpatch --reverse
-blockpatch check patch.blockpatch -R
-blockpatch apply - < patch.blockpatch
-blockpatch apply < patch.blockpatch
-blockpatch apply -i patch.blockpatch
-blockpatch apply -d repo-root -p1 patch.blockpatch
-blockpatch check -p1 < patch.blockpatch
+blockpatch apply patch.blockpatch
 blockpatch plan --json -
 blockpatch move --json -
-blockpatch move --json move.json
-blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-end $'\n}\n' --target-before $'class Target {\n'
-blockpatch move --src /dev/null --dst src/foo.ts --payload $'inserted bytes\n' --target-before $'context before\n'
-blockpatch move --src src/foo.ts --src-start $'\nfunction removeMe() {' --src-end $'\n}\n' --dst /dev/null
 ```
 
-`check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing. `-R`/`--reverse` moves the verified payload back from the target location to the source location; it works with both `check` and `apply`.
+`check` parses the patch and verifies it against the target file without writing. `apply --dry-run` does the same validation through the apply path without writing. `apply` writes the verified result.
 
-Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths, `..` escapes, and operation paths containing symlink components are rejected. Existing regular files are also realpath-checked; if the real path escapes `--cwd`, the operation is rejected. `-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
-
-`apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping because patch headers require `a/` and `b/` prefixes.
-
-`move` is the plug-and-play agent interface. JSON over stdin is the most reliable form because it avoids shell quoting problems:
+`plan --json -` is the canonical agent planning handshake: it validates a move request, renders the exact reviewable `.blockpatch`, and returns it in JSON without mutating the working tree. `move --json -` runs the same move interface directly. JSON over stdin is the most reliable form because it avoids shell quoting problems:
 
 ```sh
 blockpatch move --json - <<'JSON'
@@ -79,34 +64,9 @@ Matching and insertion are byte-exact: the moved bytes are cut at the source and
 
 The move JSON and `--diff` planner interfaces are UTF-8 text interfaces. They are intended for source text, not arbitrary binary payloads or invalid UTF-8 byte sequences.
 
-The same shape can be loaded from a file:
-
-```sh
-blockpatch move --json move.blockpatch.json
-```
-
-Human-friendly flags are also supported:
-
-```sh
-blockpatch move \
-  --src src/foo.ts \
-  --src-start $'\nexport function movedThing(' \
-  --src-end $'\n}\n' \
-  --dst src/bar.ts \
-  --target-before $'export class Target {\n' \
-  --target-after $'}\n' \
-  --expected-payload-sha256 <sha256>
-```
-
 Use `--dry-run` to validate without writing, `--diff` to print a reviewable `.blockpatch` document (`--diff` implies dry-run and never writes), and `--json-output` for machine-readable success or error output. Before `move --diff` returns success, it parses and checks its own emitted patch against the current tree in memory. `--explain` is a dry-run JSON alias for `--dry-run --json-output`; it reuses the existing `moves` byte ranges and payload hash fields.
 
-For agents, the canonical planning handshake is:
-
-```sh
-blockpatch plan --json -
-```
-
-That command is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. The explicit `move --json - --diff --json-output` form remains supported.
+`plan --json -` is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. The explicit `move --json - --diff --json-output` form remains supported.
 
 `move --json --diff` is a planner for the current tree. For relocation and deletion, the JSON request selects the payload from the current source file; if that source block is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion JSON is the exception because it includes `payload` directly.
 
@@ -197,63 +157,9 @@ type ApplyResult = {
 
 `changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes. `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the command can prove the requested final state is already present. `strip_components` is present for `check` and `apply` JSON success output and reports the effective `-p` path-stripping count; it defaults to `1`. `.blockpatch` apply/check can prove retry idempotence because the patch carries the payload; source-selected `move --json` relocation/deletion requests generally cannot after the source block is gone. `patch` is present when `move --diff --json-output` is used. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`. Human text output prints `changed <path>`, `would change <path>`, or `unchanged <path>`.
 
-Errors print:
+Error JSON and the stable error-code contract are documented in [Error Codes](#error-codes).
 
-```ts
-type BlockPatchJsonError = {
-  ok: false
-  error: {
-    code: BlockPatchErrorCode
-    message: string
-    field?: string
-    path?: string
-    phase?: string
-    anchor?: string
-    matches?: number
-    ranges?: Array<{ start: number; end: number }>
-    line_ranges?: Array<{ start: number; end: number }>
-  }
-}
-```
-
-Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. They do not include source snippets, fuzzy suggestions, or repair guidance.
-
-Error codes are the agent-facing branch contract. Removing a code or changing its meaning is semver-major.
-
-```ts
-type BlockPatchErrorCode =
-  | "parse_error"
-  | "invalid_path"
-  | "path_outside_cwd"
-  | "symlink_path"
-  | "file_not_found"
-  | "not_regular_file"
-  | "permission_denied"
-  | "io_error"
-  | "source_not_found"
-  | "source_ambiguous"
-  | "target_not_found"
-  | "target_ambiguous"
-  | "destination_exists"
-  | "payload_mismatch"
-  | "hash_mismatch"
-  | "invalid_utf8"
-  | "target_overlaps_source"
-  | "already_applied"
-  | "invalid_move_args"
-  | "invalid_json"
-  | "missing_move_args"
-  | "unknown_command"
-  | "unknown_option"
-  | "invalid_option"
-  | "missing_option_value"
-  | "too_many_args"
-  | "unexpected_error"
-```
-
-`unexpected_error` is the generic fallback for non-`BlockPatchError` failures; agents should treat it as an internal failure and avoid branching on its message.
-
-## V1 Format
+## Patch Format
 
 ```diff
 diff --blockpatch a/src/example.ts b/src/example.ts
@@ -543,3 +449,116 @@ The current format does not implement:
 - code formatting
 - copy operations
 - regex anchors
+
+## Additional Command Forms
+
+These forms are supported when you need explicit input handling, path control, reverse application, or shell-friendly move arguments.
+
+### Patch Input
+
+```sh
+blockpatch apply - < patch.blockpatch
+blockpatch apply < patch.blockpatch
+blockpatch apply -i patch.blockpatch
+```
+
+`apply` and `check` read the patch from stdin when no patch path is supplied. `-i`/`--input` names the patch file explicitly.
+
+### Paths And Stripping
+
+```sh
+blockpatch apply -d repo-root -p1 patch.blockpatch
+blockpatch check -p1 < patch.blockpatch
+```
+
+Patch-declared source and destination paths, and move JSON `src`/`dst` paths, must be relative, non-empty, and resolve inside `--cwd`. Absolute operation paths, `..` escapes, and operation paths containing symlink components are rejected. Existing regular files are also realpath-checked; if the real path escapes `--cwd`, the operation is rejected.
+
+`-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
+
+`-pN`/`--strip N` strips leading path components from patch-declared file paths. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping because patch headers require `a/` and `b/` prefixes.
+
+### Reverse
+
+```sh
+blockpatch apply patch.blockpatch --reverse
+blockpatch check patch.blockpatch -R
+```
+
+`-R`/`--reverse` moves the verified payload back from the target location to the source location; it works with both `check` and `apply`.
+
+### Move JSON Files
+
+```sh
+blockpatch move --json -
+blockpatch move --json move.json
+```
+
+`move --json -` reads the move request from stdin. The same shape can be loaded from a file with `blockpatch move --json move.json`.
+
+### Move Flags
+
+```sh
+blockpatch move --src src/foo.ts --src-start $'\nfunction movedThing() {' --src-end $'\n}\n' --target-before $'class Target {\n'
+blockpatch move --src /dev/null --dst src/foo.ts --payload $'inserted bytes\n' --target-before $'context before\n'
+blockpatch move --src src/foo.ts --src-start $'\nfunction removeMe() {' --src-end $'\n}\n' --dst /dev/null
+```
+
+Human-friendly flags are supported for direct use, but JSON is usually more reliable for agents because it avoids shell quoting problems.
+
+## Error Codes
+
+With `--json-output`, errors print:
+
+```ts
+type BlockPatchJsonError = {
+  ok: false
+  error: {
+    code: BlockPatchErrorCode
+    message: string
+    field?: string
+    path?: string
+    phase?: string
+    anchor?: string
+    matches?: number
+    ranges?: Array<{ start: number; end: number }>
+    line_ranges?: Array<{ start: number; end: number }>
+  }
+}
+```
+
+Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. They do not include source snippets, fuzzy suggestions, or repair guidance.
+
+Error codes are the agent-facing branch contract. Removing a code or changing its meaning is semver-major.
+
+```ts
+type BlockPatchErrorCode =
+  | "parse_error"
+  | "invalid_path"
+  | "path_outside_cwd"
+  | "symlink_path"
+  | "file_not_found"
+  | "not_regular_file"
+  | "permission_denied"
+  | "io_error"
+  | "source_not_found"
+  | "source_ambiguous"
+  | "target_not_found"
+  | "target_ambiguous"
+  | "destination_exists"
+  | "payload_mismatch"
+  | "hash_mismatch"
+  | "invalid_utf8"
+  | "target_overlaps_source"
+  | "already_applied"
+  | "invalid_move_args"
+  | "invalid_json"
+  | "missing_move_args"
+  | "unknown_command"
+  | "unknown_option"
+  | "invalid_option"
+  | "missing_option_value"
+  | "too_many_args"
+  | "unexpected_error"
+```
+
+`unexpected_error` is the generic fallback for non-`BlockPatchError` failures; agents should treat it as an internal failure and avoid branching on its message.
