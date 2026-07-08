@@ -24,8 +24,8 @@ npx blockpatch --help
 
 `blockpatch` is a deterministic move planner/apply layer for coding agents:
 
-1. Send a JSON move request to `blockpatch plan --json -`.
-2. Show the returned `.blockpatch` to the user for review.
+1. Send a JSON move request to `blockpatch move --json - --diff`.
+2. Show the emitted `.blockpatch` to the user for review.
 3. Apply the reviewed patch with `blockpatch apply`.
 4. Retry the `.blockpatch`, not the original JSON request.
 
@@ -45,10 +45,10 @@ export function movedThing() {
 export const target = "here";
 ```
 
-The JSON request selects the source bytes and target anchors. Ask `blockpatch` to plan the byte-exact move and save the JSON envelope:
+The JSON request selects the source bytes and target anchors. Ask `blockpatch` to plan the byte-exact move and emit the reviewable patch:
 
 ```sh
-blockpatch plan --json - <<'JSON' > plan.json
+blockpatch move --json - --diff <<'JSON' > patch.blockpatch
 {
   "src": "src/foo.ts",
   "src_start": "\nexport function movedThing() {\n",
@@ -59,38 +59,41 @@ blockpatch plan --json - <<'JSON' > plan.json
 JSON
 ```
 
-`plan.json` contains output like this, with the `patch` string abbreviated here:
+`patch.blockpatch` now carries the move as a unified-diff-shaped document:
 
-```json
-{
-  "ok": true,
-  "changed": ["src/foo.ts", "src/bar.ts"],
-  "affected": ["src/foo.ts", "src/bar.ts"],
-  "written": false,
-  "noop": false,
-  "status": "applied",
-  "moves": [
-    {
-      "id": "move-1",
-      "src": "src/foo.ts",
-      "dst": "src/bar.ts",
-      "payload_sha256": "bb03c42613e9289c043d2fced7ce2d8c87410cdb15fa48341ce79fa409d45303",
-      "payload_bytes": 47,
-      "source_range": { "start": 44, "end": 91 },
-      "target_range": { "start": 0, "end": 30 },
-      "insert_index": 30
-    }
-  ],
-  "patch": "diff --blockpatch a/src/foo.ts b/src/foo.ts\n..."
-}
+```diff
+diff --blockpatch a/src/foo.ts b/src/foo.ts
+blockpatch version 1
+blockpatch move id=move-1 role=source payload-sha256=bb03c42613e9289c043d2fced7ce2d8c87410cdb15fa48341ce79fa409d45303
+--- a/src/foo.ts
++++ b/src/foo.ts
+
+@@ -3,5 +3,1 @@ blockpatch-source id=move-1
+ }
+-
+-export function movedThing() {
+-  return 42;
+-}
+
+diff --blockpatch a/src/bar.ts b/src/bar.ts
+blockpatch version 1
+blockpatch move id=move-1 role=target payload-sha256=bb03c42613e9289c043d2fced7ce2d8c87410cdb15fa48341ce79fa409d45303
+--- a/src/bar.ts
++++ b/src/bar.ts
+
+@@ -1,1 +1,5 @@ blockpatch-target id=move-1
+ export const target = "here";
++
++export function movedThing() {
++  return 42;
++}
 ```
 
-`plan` validates the source delimiters and target anchors, computes byte ranges, hashes the selected payload, renders a reviewable `.blockpatch`, self-checks that patch against the current tree in memory, and returns the patch in JSON without writing.
+`move --diff` validates the source delimiters and target anchors, hashes the selected payload, self-checks the rendered patch against the current tree in memory, and prints it without writing to the tree.
 
-Review the returned `patch` string, save it as a `.blockpatch`, then apply that artifact explicitly:
+Review the patch, then apply it:
 
 ```sh
-jq -r .patch plan.json > patch.blockpatch
 blockpatch apply patch.blockpatch
 ```
 
@@ -99,7 +102,7 @@ changed src/foo.ts
 changed src/bar.ts
 ```
 
-`apply` re-verifies the artifact against the current tree — the payload hash must match and the source block and target anchors must each match exactly once — then replaces both files atomically. The tree now matches the requested final state:
+`apply` checks the payload hash, requires the source block and target anchors to each match exactly once in the current tree, and replaces each changed file atomically. The tree now matches the requested final state:
 
 ```ts
 // after: src/foo.ts
@@ -115,9 +118,9 @@ export function movedThing() {
 }
 ```
 
-Retrying the same `patch.blockpatch` against this tree reports `already_applied`: the artifact carries the exact payload and hash, so it validates the final state without asking the agent to reselect bytes from a changed tree.
+Retrying the same `patch.blockpatch` against this tree reports `already_applied`: the patch carries the payload and hash, so a retry validates the final state instead of reselecting bytes from a changed tree.
 
-The same JSON planning handshake covers whole-file path creation and removal with explicit `mode: "create_file"` and `mode: "remove_file"` requests; the returned review artifact uses strict `/dev/null` file headers.
+The same handshake covers whole-file creation and removal via `mode: "create_file"` and `mode: "remove_file"`; those patches use strict `/dev/null` file headers.
 
 ## Common Commands
 
@@ -131,14 +134,14 @@ blockpatch move --json -
 
 `check` parses a patch and verifies it against the target tree without writing. `apply --dry-run` validates through the apply path without writing. `apply` writes the verified result.
 
-`plan --json -` is the canonical agent planning handshake. `move --json -` uses the same move interface directly. JSON over stdin is the most reliable form because it avoids shell quoting problems.
+`move --json -` applies a move request directly; with `--diff` it only prints the rendered patch. `plan --json -` runs the same planner but returns a JSON envelope with validation metadata and the patch in its `patch` field — the agent-facing form shown in [Commands](docs/commands.md). JSON over stdin is the most reliable form because it avoids shell quoting problems.
 
 When using `--cwd`, operation paths inside patches and move JSON are relative to `--cwd`; input patch and move JSON filenames are normal CLI paths, relative to your shell working directory unless absolute.
 
 ## Docs
 
-- [Commands](docs/commands.md): CLI forms, move JSON, JSON output, and error codes.
-- [Patch spec](docs/spec.md): canonical `.blockpatch` artifact format, hunk syntax, `/dev/null`, byte rules, and format scope.
+- [Commands](docs/commands.md): supported CLI forms and flags.
+- [Patch spec](docs/spec.md): canonical `.blockpatch` artifact format, hunk syntax, `/dev/null`, byte rules, move JSON requests, JSON output, and error codes.
 - [Behavior](docs/behavior.md): exact matching, idempotence, path containment, failure rules, and write behavior.
 
 ## Examples

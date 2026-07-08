@@ -12,7 +12,7 @@ The payload hash is checked before any write happens. For paired moves, the sour
 
 ## Planning And Retry Flow
 
-`plan --json -` is the canonical planning handshake. It is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree. The explicit `move --json - --diff --json-output` form remains supported.
+`plan --json -` is the canonical planning handshake. It is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, self-checks that patch through the same in-memory `check` path, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree.
 
 `move --json --diff` is a planner for the current tree. For relocation, in-file deletion, and whole-file removal, the JSON request selects the payload from the current source file; if that source block or file is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion and `create_file` JSON are the exceptions because they include `payload` directly.
 
@@ -29,7 +29,7 @@ Rejected operation paths include:
 - paths containing symlink components
 - existing regular files whose real path escapes `--cwd`
 
-`-d`/`--directory` is an alias for `--cwd`. Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
+Patch files and move JSON files may be read from any path; use `--cwd` to choose the directory the operation is allowed to modify.
 
 Relative patch file paths and relative move JSON file paths resolve from the shell working directory, not from `--cwd`. Operation paths declared inside a patch or move JSON request resolve inside `--cwd`.
 
@@ -60,7 +60,7 @@ For target hunks in existing files, insertion occurs between target-before and t
  context after
 ```
 
-The moved bytes are extracted from the source file, not regenerated from arguments.
+The moved bytes are extracted from the source file, not regenerated from arguments. `apply` and `check` preserve parsed hunk body bytes exactly, including CRLF and no-trailing-newline cases.
 
 ## Move JSON Behavior
 
@@ -78,6 +78,8 @@ For target placement:
 When `expected_payload_sha256` is supplied, the moved or materialized payload bytes must hash to that value before any write happens.
 
 Same-file source and target overlap is a hard failure.
+
+`move --json` and generated `move --diff` output render anchors and payloads as UTF-8 text, so they are not a binary-safe round trip for invalid UTF-8.
 
 ## Patch Evaluation
 
@@ -185,12 +187,6 @@ Once renames begin, a two-file operation is not transactional. The destination i
 - the target anchor is ambiguous
 - the target anchor overlaps the source payload
 - file I/O fails before a write completes
-
-## Output Modes
-
-Without `--json-output`, successful commands print `changed <path>`, `would change <path>`, or `unchanged <path>`.
-
-With `--json-output`, successes and errors use the stable contract documented in [Patch spec](spec.md#json-output). Agents should branch on `error.code`, not on human-readable messages.
 
 ## Intentionally Out Of Scope
 

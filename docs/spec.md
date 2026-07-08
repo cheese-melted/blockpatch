@@ -35,8 +35,6 @@ blockpatch move id=move-1 payload-sha256=bc8a95d6eb2b44aa564dbae1040ba8ff2273988
    methodAfter() {
 ```
 
-Line numbers in hunk headers are review hints only.
-
 Same-file moves, insertions, and deletions use one file section. In that shape, the `--- a/<path>` and `+++ b/<path>` headers must name the same file after normal path cleanup.
 
 ```text
@@ -87,16 +85,16 @@ blockpatch move id=<id> role=target payload-sha256=<sha256>
 
 Format constraints:
 
-- The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. Unlike GNU patch, `blockpatch` defaults to git-style `-p1` path stripping: `a/src/file.ts` and `b/src/file.ts` resolve as `src/file.ts`; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
+- The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. The prefixes are consumed by the default `-p1` path stripping ([Commands](commands.md#paths-and-stripping)).
 - `blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
 - Source context before and after may each be empty.
-- Target hunks for existing files must include context on at least one side.
-- Either target side may be empty, but not both, unless the target hunk is a whole-file `/dev/null -> file` creation hunk.
+- Target hunks for existing files must include context on at least one side; either side may be empty, but not both.
+- Whole-file creation and removal hunks (a `/dev/null` endpoint) contain only contiguous payload lines, with no context lines.
 - The `-<old-start>,<old-count> +<new-start>,<new-count>` ranges must match the hunk body line counts, but the range values are line-number hints for review.
 
 ## One-Sided Hunks And Null Endpoints
 
-Same-file sections may contain a source hunk and a target hunk, a source hunk only, or a target hunk only. One-sided hunks are for in-file insertion and deletion when the file exists both before and after the patch.
+One-sided hunks are for in-file insertion and deletion when the file exists both before and after the patch.
 
 Target-only insertion into an existing file:
 
@@ -180,8 +178,6 @@ Hunk body lines use unified-diff prefixes:
 - `+` for target payload
 
 The byte content after the prefix is matched exactly, including line endings. The standard `\ No newline at end of file` marker is supported for a hunk body line without a trailing newline.
-
-`.blockpatch` `apply` and `check` preserve parsed hunk body bytes exactly, including CRLF and no-trailing-newline cases. `move --json` and generated `move --diff` output render anchors and payloads as UTF-8 text, so they are not a binary-safe round trip for invalid UTF-8.
 
 Blank lines are separators between the header and hunks. A blank line inside a hunk body is an error; encode an empty context line as a single space.
 
@@ -317,7 +313,7 @@ type BlockPatchJsonError = {
 
 Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. They do not include source snippets, fuzzy suggestions, or repair guidance.
 
-Error codes are the agent-facing branch contract. Removing a code or changing its meaning is semver-major.
+Error codes are the agent-facing branch contract: branch on `error.code`, not on human-readable messages. Removing a code or changing its meaning is semver-major.
 
 ```ts
 type BlockPatchErrorCode =
