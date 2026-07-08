@@ -69,6 +69,32 @@ blockpatch plan --json - <<'JSON'
 JSON
 ```
 
+Expected output is JSON on stdout. Formatted here with the `patch` string abbreviated:
+
+```json
+{
+  "ok": true,
+  "changed": ["src/foo.ts", "src/bar.ts"],
+  "affected": ["src/foo.ts", "src/bar.ts"],
+  "written": false,
+  "noop": false,
+  "status": "applied",
+  "moves": [
+    {
+      "id": "move-1",
+      "src": "src/foo.ts",
+      "dst": "src/bar.ts",
+      "payload_sha256": "bb03c42613e9289c043d2fced7ce2d8c87410cdb15fa48341ce79fa409d45303",
+      "payload_bytes": 47,
+      "source_range": { "start": 44, "end": 91 },
+      "target_range": { "start": 0, "end": 30 },
+      "insert_index": 30
+    }
+  ],
+  "patch": "diff --blockpatch a/src/foo.ts b/src/foo.ts\n..."
+}
+```
+
 `plan` validates the source delimiters and target anchors, computes byte ranges, hashes the selected payload, renders a reviewable `.blockpatch`, self-checks that patch against the current tree in memory, and returns the patch in JSON without writing.
 
 Apply the reviewed patch explicitly:
