@@ -3,8 +3,9 @@ import { lstat, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { applyPatchFile, checkPatchBytesInMemory, checkPatchFile } from "../src/engine";
+import { applyPatchFile, checkPatchBytesInMemory, checkPatchFile, indexesOfLimited, writeAtomic } from "../src/engine";
 import { BlockPatchError } from "../src/errors";
+import { readFileSnapshot } from "../src/files";
 import {
   conformanceAfter,
   conformanceFixture,
@@ -31,6 +32,21 @@ import {
 import type { PublicExampleCase } from "./helpers";
 
 describe("blockpatch golden fixtures", () => {
+  test("indexesOfLimited caps collected matches", () => {
+    expect(indexesOfLimited(Buffer.from("aaaa"), Buffer.from("aa"), 2)).toEqual({
+      matches: [0, 1],
+      truncated: true
+    });
+    expect(indexesOfLimited(Buffer.from("aaaa"), Buffer.from("aa"), 3)).toEqual({
+      matches: [0, 1, 2],
+      truncated: false
+    });
+    expect(indexesOfLimited(Buffer.from("aaaa"), Buffer.from("z"), 2)).toEqual({
+      matches: [],
+      truncated: false
+    });
+  });
+
   test("successful move", async () => {
     await expectFixtureApply("success");
   });
@@ -841,6 +857,63 @@ describe("patch --fuzz=0 conformance", () => {
     await expect(applyPatchFile("generated.blockpatch", { cwd })).rejects.toThrow(
       "Hunk line counts do not match header"
     );
+  });
+});
+
+describe("atomic write concurrency guards", () => {
+  test("rejects an existing file changed after snapshot", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-concurrent-write-"));
+    const path = join(cwd, "file.txt");
+    await writeFile(path, "original\n");
+    const snapshot = await readFileSnapshot(path, "file");
+    await writeFile(path, "external\n");
+
+    let error: unknown;
+    try {
+      await writeAtomic(path, Buffer.from("planned\n"), {
+        expected: { kind: "file", label: "file.txt", snapshot }
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("concurrent_modification");
+    expect((error as BlockPatchError).details).toMatchObject({ path: "file.txt", phase: "write" });
+    expect(await readFile(path, "utf8")).toBe("external\n");
+  });
+
+  test("rejects a create target that appears with different bytes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-concurrent-create-"));
+    const path = join(cwd, "file.txt");
+    await writeFile(path, "external\n");
+
+    let error: unknown;
+    try {
+      await writeAtomic(path, Buffer.from("planned\n"), {
+        create: true,
+        expected: { kind: "missing", label: "file.txt", bytesIfExists: Buffer.from("planned\n") }
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("concurrent_modification");
+    expect(await readFile(path, "utf8")).toBe("external\n");
+  });
+
+  test("allows a create target that already contains the expected bytes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-concurrent-create-same-"));
+    const path = join(cwd, "file.txt");
+    await writeFile(path, "planned\n");
+
+    await writeAtomic(path, Buffer.from("planned\n"), {
+      create: true,
+      expected: { kind: "missing", label: "file.txt", bytesIfExists: Buffer.from("planned\n") }
+    });
+
+    expect(await readFile(path, "utf8")).toBe("planned\n");
   });
 });
 

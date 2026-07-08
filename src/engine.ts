@@ -2,15 +2,31 @@ import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { boundedLineRanges, boundedMatchLineRanges, boundedMatchRanges, boundedRanges, fail } from "./errors";
-import { assertRegularFile, failFileSystem, readFileChecked, statChecked } from "./files";
+import type { Stats } from "node:fs";
+import {
+  BlockPatchError,
+  boundedLineRanges,
+  boundedMatchLineRanges,
+  boundedMatchRanges,
+  boundedRanges,
+  fail,
+  matchCountDetails,
+  matchedLocations
+} from "./errors";
+import { assertRegularFile, failFileSystem, readFileChecked, readFileSnapshot } from "./files";
 import { devNull, parseBlockPatch } from "./parser";
 import { resolvePath, resolvePathAllowMissing, sameFileIdentity } from "./paths";
 import type { ApplyOptions, ApplyResult, BlockPatch, MoveResultDetails } from "./types";
+import type { FileSnapshot, FileStatSnapshot } from "./files";
 
 export interface ByteRange {
   start: number;
   end: number;
+}
+
+export interface LimitedMatches {
+  matches: number[];
+  truncated: boolean;
 }
 
 export interface TargetSelection {
@@ -43,20 +59,41 @@ export interface CommitMoveArgs {
   dryRun: boolean;
   srcOriginal: Buffer;
   dstOriginal: Buffer;
+  srcSnapshot?: FileSnapshot;
+  dstSnapshot?: FileSnapshot;
   selection: MoveSelection;
   srcLabel: string;
   dstLabel: string;
+}
+
+export type AtomicPathExpectation =
+  | { kind: "file"; label: string; snapshot: FileSnapshot }
+  | { kind: "missing"; label: string; bytesIfExists?: Buffer };
+
+export interface AtomicWriteOptions {
+  create?: boolean;
+  expected?: AtomicPathExpectation;
+  label?: string;
 }
 
 interface AtomicWriteRequest {
   path: string;
   bytes: Buffer;
   create?: boolean;
+  expected?: AtomicPathExpectation;
+  label?: string;
+}
+
+interface AtomicDeleteRequest {
+  path: string;
+  expected?: AtomicPathExpectation;
+  label?: string;
 }
 
 interface StagedAtomicWrite {
   path: string;
   temp: string;
+  request: AtomicWriteRequest;
 }
 
 export interface InMemoryPatchFile {
@@ -70,14 +107,25 @@ interface InMemoryFileState {
   identity: string;
 }
 
+interface WorkspacePathState {
+  path: string;
+  snapshot?: FileSnapshot;
+  missing?: boolean;
+}
+
 interface PatchWorkspace {
   files: Map<string, InMemoryFileState>;
-  paths: Map<string, string>;
+  paths: Map<string, WorkspacePathState>;
 }
 
 type PatchMutation =
   | { kind: "write"; label: string; bytes: Buffer; create?: boolean }
   | { kind: "delete"; label: string };
+
+interface LimitedRanges {
+  ranges: ByteRange[];
+  truncated: boolean;
+}
 
 interface PlannedPatch {
   result: ApplyResult;
@@ -158,17 +206,19 @@ async function readPatchWorkspace(patch: BlockPatch, cwd: string): Promise<Patch
   if (patch.src === null || patch.dst === null) {
     if (patch.src === null && patch.dst !== null && !patch.hasSourceHunk) {
       const resolved = resolvePathAllowMissing(cwd, patch.dst, "destination path");
-      rememberPath(workspace, patch.dst, resolved.path);
       if (resolved.exists) {
-        rememberFile(workspace, patch.dst, resolved.path, await readFileChecked(resolved.path, "destination file"));
+        rememberFile(workspace, patch.dst, resolved.path, await readFileSnapshot(resolved.path, "destination file"));
+      } else {
+        rememberMissingPath(workspace, patch.dst, resolved.path);
       }
       return workspace;
     }
     if (patch.dst === null && patch.src !== null && patch.hasSourceHunk) {
       const resolved = resolvePathAllowMissing(cwd, patch.src, "source path");
-      rememberPath(workspace, patch.src, resolved.path);
       if (resolved.exists) {
-        rememberFile(workspace, patch.src, resolved.path, await readFileChecked(resolved.path, "source file"));
+        rememberFile(workspace, patch.src, resolved.path, await readFileSnapshot(resolved.path, "source file"));
+      } else {
+        rememberMissingPath(workspace, patch.src, resolved.path);
       }
       return workspace;
     }
@@ -177,72 +227,94 @@ async function readPatchWorkspace(patch: BlockPatch, cwd: string): Promise<Patch
 
   if (!patch.hasSourceHunk) {
     const dstPath = resolvePath(cwd, patch.dst, "destination path");
-    rememberFile(workspace, patch.dst, dstPath, await readFileChecked(dstPath, "destination file"));
+    rememberFile(workspace, patch.dst, dstPath, await readFileSnapshot(dstPath, "destination file"));
     return workspace;
   }
 
   if (patch.target === null) {
     const srcPath = resolvePath(cwd, patch.src, "source path");
-    rememberFile(workspace, patch.src, srcPath, await readFileChecked(srcPath, "source file"));
+    rememberFile(workspace, patch.src, srcPath, await readFileSnapshot(srcPath, "source file"));
     return workspace;
   }
 
   const srcPath = resolvePath(cwd, patch.src, "source path");
   const dstPath = resolvePath(cwd, patch.dst, "destination path");
   const sameFile = await sameFileIdentity(srcPath, dstPath);
-  const srcOriginal = await readFileChecked(srcPath, "source file");
-  const dstOriginal = sameFile ? srcOriginal : await readFileChecked(dstPath, "destination file");
+  const srcSnapshot = await readFileSnapshot(srcPath, "source file");
+  const dstSnapshot = sameFile ? srcSnapshot : await readFileSnapshot(dstPath, "destination file");
   const identity = sameFile ? "paired-file" : undefined;
-  rememberFile(workspace, patch.src, srcPath, srcOriginal, identity);
-  rememberFile(workspace, patch.dst, dstPath, dstOriginal, identity);
+  rememberFile(workspace, patch.src, srcPath, srcSnapshot, identity);
+  rememberFile(workspace, patch.dst, dstPath, dstSnapshot, identity);
   return workspace;
 }
 
-function rememberPath(workspace: PatchWorkspace, label: string, path: string): void {
-  workspace.paths.set(label, path);
+function rememberMissingPath(workspace: PatchWorkspace, label: string, path: string): void {
+  workspace.paths.set(label, { path, missing: true });
 }
 
 function rememberFile(
   workspace: PatchWorkspace,
   label: string,
   path: string,
-  bytes: Buffer,
+  snapshot: FileSnapshot,
   identity = path
 ): void {
-  rememberPath(workspace, label, path);
-  workspace.files.set(label, { bytes, identity });
+  workspace.paths.set(label, { path, snapshot });
+  workspace.files.set(label, { bytes: snapshot.bytes, identity });
 }
 
-async function commitPatchMutations(mutations: readonly PatchMutation[], paths: Map<string, string>): Promise<void> {
+async function commitPatchMutations(
+  mutations: readonly PatchMutation[],
+  paths: Map<string, WorkspacePathState>
+): Promise<void> {
   const writes: AtomicWriteRequest[] = [];
-  const deletes: string[] = [];
+  const deletes: AtomicDeleteRequest[] = [];
 
   for (const mutation of mutations) {
-    const path = mutationPath(paths, mutation.label);
+    const pathState = mutationPath(paths, mutation.label);
     if (mutation.kind === "write") {
-      writes.push({ path, bytes: mutation.bytes, create: mutation.create });
+      writes.push({
+        path: pathState.path,
+        bytes: mutation.bytes,
+        create: mutation.create,
+        label: mutation.label,
+        expected: writeExpectation(mutation, pathState)
+      });
     } else {
-      deletes.push(path);
+      deletes.push({
+        path: pathState.path,
+        label: mutation.label,
+        expected: fileExpectation(mutation.label, pathState)
+      });
     }
   }
 
-  await writeAtomically(writes);
-
-  for (const path of deletes) {
-    try {
-      await unlink(path);
-    } catch (error) {
-      failFileSystem(error, path, "Could not remove file");
-    }
-  }
+  await writeAtomically(writes, deletes);
 }
 
-function mutationPath(paths: Map<string, string>, label: string): string {
-  const path = paths.get(label);
-  if (path === undefined) {
+function writeExpectation(mutation: Extract<PatchMutation, { kind: "write" }>, state: WorkspacePathState): AtomicPathExpectation {
+  if (state.snapshot !== undefined) {
+    return { kind: "file", label: mutation.label, snapshot: state.snapshot };
+  }
+  if (state.missing === true && mutation.create === true) {
+    return { kind: "missing", label: mutation.label, bytesIfExists: mutation.bytes };
+  }
+  fail("parse_error", `No original state for planned write: ${mutation.label}`, { path: mutation.label, phase: "path" });
+}
+
+function fileExpectation(label: string, state: WorkspacePathState): AtomicPathExpectation {
+  if (state.snapshot !== undefined) {
+    return { kind: "file", label, snapshot: state.snapshot };
+  }
+  fail("parse_error", `No original file state for planned mutation: ${label}`, { path: label, phase: "path" });
+}
+
+function mutationPath(paths: Map<string, WorkspacePathState>, label: string): WorkspacePathState {
+  const state = paths.get(label);
+  if (state === undefined) {
     fail("parse_error", `No resolved path for planned mutation: ${label}`, { path: label, phase: "path" });
   }
-  return path;
+  return state;
 }
 
 function resultWithWriteFlag(result: ApplyResult, dryRun: boolean): ApplyResult {
@@ -542,19 +614,20 @@ function requireTarget(patch: BlockPatch): NonNullable<BlockPatch["target"]> {
 
 function findDeletionSourceRange(file: Buffer, patch: BlockPatch, srcLabel: string): ByteRange | undefined {
   const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
-  const fullMatches = indexesOf(file, fullSource);
+  const fullMatchResult = indexesOfLimited(file, fullSource);
+  const fullMatches = fullMatchResult.matches;
 
-  if (fullMatches.length === 1) {
+  if (fullMatches.length === 1 && !fullMatchResult.truncated) {
     const start = fullMatches[0] + patch.sourceBefore.length;
     return { start, end: start + patch.sourcePayload.length };
   }
 
-  if (fullMatches.length > 1) {
-    fail("source_ambiguous", `Source block is ambiguous in ${srcLabel}; matched ${fullMatches.length} locations`, {
+  if (fullMatches.length > 1 || fullMatchResult.truncated) {
+    fail("source_ambiguous", `Source block is ambiguous in ${srcLabel}; ${matchedLocations(fullMatches.length, fullMatchResult.truncated)}`, {
       path: srcLabel,
       phase: "source",
       anchor: "blockpatch-source",
-      matches: fullMatches.length,
+      ...matchCountDetails(fullMatches.length, fullMatchResult.truncated),
       ranges: boundedMatchRanges(fullMatches, fullSource.length),
       line_ranges: boundedMatchLineRanges(file, fullMatches, fullSource.length)
     });
@@ -574,39 +647,40 @@ function deletionAlreadyAppliedOrFail(
   }
 
   const adjacent = Buffer.concat([patch.sourceBefore, patch.sourceAfter]);
-  const adjacentMatches = indexesOf(file, adjacent).filter((start) =>
+  const adjacentMatchResult = indexesOfLimitedWhere(file, adjacent, (start) =>
     isDeletionAlreadyAppliedMatch(file, patch, start)
   );
-  if (adjacentMatches.length === 1) {
+  const adjacentMatches = adjacentMatchResult.matches;
+  if (adjacentMatches.length === 1 && !adjacentMatchResult.truncated) {
     return undefined;
   }
-  if (adjacentMatches.length > 1) {
+  if (adjacentMatches.length > 1 || adjacentMatchResult.truncated) {
     fail("source_ambiguous", `Already-deleted source anchors are ambiguous in ${srcLabel}`, {
       path: srcLabel,
       phase: "source",
       anchor: "blockpatch-source",
-      matches: adjacentMatches.length,
+      ...matchCountDetails(adjacentMatches.length, adjacentMatchResult.truncated),
       ranges: boundedMatchRanges(adjacentMatches, adjacent.length),
       line_ranges: boundedMatchLineRanges(file, adjacentMatches, adjacent.length)
     });
   }
 
   const envelopes = findSourceEnvelopes(file, patch);
-  if (envelopes.length === 1) {
+  if (envelopes.ranges.length === 1 && !envelopes.truncated) {
     fail("payload_mismatch", `Source payload does not match located source anchors in ${srcLabel}`, {
       path: srcLabel,
       phase: "payload",
       anchor: "blockpatch-source"
     });
   }
-  if (envelopes.length > 1) {
-    fail("source_ambiguous", `Source anchors are ambiguous in ${srcLabel}; matched ${envelopes.length} locations`, {
+  if (envelopes.ranges.length > 1 || envelopes.truncated) {
+    fail("source_ambiguous", `Source anchors are ambiguous in ${srcLabel}; ${matchedLocations(envelopes.ranges.length, envelopes.truncated)}`, {
       path: srcLabel,
       phase: "source",
       anchor: "blockpatch-source",
-      matches: envelopes.length,
-      ranges: boundedRanges(envelopes),
-      line_ranges: boundedLineRanges(file, envelopes)
+      ...matchCountDetails(envelopes.ranges.length, envelopes.truncated),
+      ranges: boundedRanges(envelopes.ranges),
+      line_ranges: boundedLineRanges(file, envelopes.ranges)
     });
   }
   fail("source_not_found", `Source anchors were not found in ${srcLabel}`, {
@@ -762,10 +836,20 @@ export async function commitMove(args: CommitMoveArgs): Promise<string[]> {
     // Destination before source: once renames begin, an interrupted cross-file
     // move can leave the payload duplicated in both files, never deleted from both.
     if (dstChanged || (sameFileAlias && srcChanged)) {
-      writes.push({ path: args.dstPath, bytes: next.dst });
+      writes.push({
+        path: args.dstPath,
+        bytes: next.dst,
+        label: args.dstLabel,
+        expected: args.dstSnapshot === undefined ? undefined : { kind: "file", label: args.dstLabel, snapshot: args.dstSnapshot }
+      });
     }
     if (srcChanged) {
-      writes.push({ path: args.srcPath, bytes: next.src });
+      writes.push({
+        path: args.srcPath,
+        bytes: next.src,
+        label: args.srcLabel,
+        expected: args.srcSnapshot === undefined ? undefined : { kind: "file", label: args.srcLabel, snapshot: args.srcSnapshot }
+      });
     }
     await writeAtomically(writes);
   }
@@ -819,19 +903,20 @@ export function applyCrossFileMove(
 function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): ByteRange | undefined {
   const srcLabel = patch.src ?? devNull;
   const fullSource = Buffer.concat([patch.sourceBefore, patch.sourcePayload, patch.sourceAfter]);
-  const fullMatches = indexesOf(srcFile, fullSource);
+  const fullMatchResult = indexesOfLimited(srcFile, fullSource);
+  const fullMatches = fullMatchResult.matches;
 
-  if (fullMatches.length === 1) {
+  if (fullMatches.length === 1 && !fullMatchResult.truncated) {
     const start = fullMatches[0] + patch.sourceBefore.length;
     return { start, end: start + patch.sourcePayload.length };
   }
 
-  if (fullMatches.length > 1) {
-    fail("source_ambiguous", `Source block is ambiguous in ${srcLabel}; matched ${fullMatches.length} locations`, {
+  if (fullMatches.length > 1 || fullMatchResult.truncated) {
+    fail("source_ambiguous", `Source block is ambiguous in ${srcLabel}; ${matchedLocations(fullMatches.length, fullMatchResult.truncated)}`, {
       path: srcLabel,
       phase: "source",
       anchor: "blockpatch-source",
-      matches: fullMatches.length,
+      ...matchCountDetails(fullMatches.length, fullMatchResult.truncated),
       ranges: boundedMatchRanges(fullMatches, fullSource.length),
       line_ranges: boundedMatchLineRanges(srcFile, fullMatches, fullSource.length)
     });
@@ -843,7 +928,7 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
   }
 
   const envelopes = findSourceEnvelopes(srcFile, patch);
-  if (envelopes.length === 1) {
+  if (envelopes.ranges.length === 1 && !envelopes.truncated) {
     fail("payload_mismatch", `Source payload does not match located source anchors in ${srcLabel}`, {
       path: srcLabel,
       phase: "payload",
@@ -851,14 +936,14 @@ function findSourceRange(srcFile: Buffer, dstFile: Buffer, patch: BlockPatch): B
     });
   }
 
-  if (envelopes.length > 1) {
-    fail("source_ambiguous", `Source anchors are ambiguous in ${srcLabel}; matched ${envelopes.length} locations`, {
+  if (envelopes.ranges.length > 1 || envelopes.truncated) {
+    fail("source_ambiguous", `Source anchors are ambiguous in ${srcLabel}; ${matchedLocations(envelopes.ranges.length, envelopes.truncated)}`, {
       path: srcLabel,
       phase: "source",
       anchor: "blockpatch-source",
-      matches: envelopes.length,
-      ranges: boundedRanges(envelopes),
-      line_ranges: boundedLineRanges(srcFile, envelopes)
+      ...matchCountDetails(envelopes.ranges.length, envelopes.truncated),
+      ranges: boundedRanges(envelopes.ranges),
+      line_ranges: boundedLineRanges(srcFile, envelopes.ranges)
     });
   }
 
@@ -877,21 +962,22 @@ function findAlreadyAppliedTargetSelection(
 ): TargetSelection | undefined {
   const target = requireTarget(patch);
   const alreadyApplied = Buffer.concat([target.before, patch.sourcePayload, target.after]);
-  const matches = indexesOf(file, alreadyApplied);
+  const matchResult = indexesOfLimited(file, alreadyApplied);
+  const matches = matchResult.matches;
 
   if (matches.length === 0) {
     return undefined;
   }
 
-  if (matches.length > 1) {
+  if (matches.length > 1 || matchResult.truncated) {
     fail(
       "target_ambiguous",
-      `Already-applied target is ambiguous in ${dstLabel}; matched ${matches.length} locations`,
+      `Already-applied target is ambiguous in ${dstLabel}; ${matchedLocations(matches.length, matchResult.truncated)}`,
       {
         path: dstLabel,
         phase: "target",
         anchor: "blockpatch-target",
-        matches: matches.length,
+        ...matchCountDetails(matches.length, matchResult.truncated),
         ranges: boundedMatchRanges(matches, alreadyApplied.length),
         line_ranges: boundedMatchLineRanges(file, matches, alreadyApplied.length)
       }
@@ -905,20 +991,28 @@ function findAlreadyAppliedTargetSelection(
   };
 }
 
-function findSourceEnvelopes(file: Buffer, patch: BlockPatch): ByteRange[] {
-  const beforeMatches = indexesOf(file, patch.sourceBefore);
-  const afterMatches = indexesOf(file, patch.sourceAfter);
-  const ranges: ByteRange[] = [];
-
-  for (const beforeStart of beforeMatches) {
-    const payloadStart = beforeStart + patch.sourceBefore.length;
-    const afterStart = afterMatches.find((candidate) => candidate >= payloadStart);
-    if (afterStart !== undefined) {
-      ranges.push({ start: payloadStart, end: afterStart });
-    }
+function findSourceEnvelopes(file: Buffer, patch: BlockPatch, limit = 11): LimitedRanges {
+  if (patch.sourceBefore.length === 0 || patch.sourceAfter.length === 0) {
+    return { ranges: [], truncated: false };
   }
 
-  return ranges;
+  const maxMatches = normalizedLimit(limit);
+  const ranges: ByteRange[] = [];
+  let beforeStart = file.indexOf(patch.sourceBefore);
+
+  while (beforeStart !== -1) {
+    const payloadStart = beforeStart + patch.sourceBefore.length;
+    const afterStart = file.indexOf(patch.sourceAfter, payloadStart);
+    if (afterStart !== -1) {
+      if (ranges.length >= maxMatches) {
+        return { ranges, truncated: true };
+      }
+      ranges.push({ start: payloadStart, end: afterStart });
+    }
+    beforeStart = file.indexOf(patch.sourceBefore, beforeStart + 1);
+  }
+
+  return { ranges, truncated: false };
 }
 
 export function findTargetSelection(
@@ -929,7 +1023,8 @@ export function findTargetSelection(
   details: { phase?: string; anchor?: string } = {}
 ): TargetSelection {
   const anchor = Buffer.concat([before, after]);
-  const matches = indexesOf(file, anchor);
+  const matchResult = indexesOfLimited(file, anchor);
+  const matches = matchResult.matches;
 
   if (matches.length === 0) {
     fail("target_not_found", `Target anchor was not found in ${dstLabel}`, {
@@ -939,11 +1034,11 @@ export function findTargetSelection(
     });
   }
 
-  if (matches.length > 1) {
-    fail("target_ambiguous", `Target anchor is ambiguous in ${dstLabel}; matched ${matches.length} locations`, {
+  if (matches.length > 1 || matchResult.truncated) {
+    fail("target_ambiguous", `Target anchor is ambiguous in ${dstLabel}; ${matchedLocations(matches.length, matchResult.truncated)}`, {
       path: dstLabel,
       ...details,
-      matches: matches.length,
+      ...matchCountDetails(matches.length, matchResult.truncated),
       ranges: boundedMatchRanges(matches, anchor.length),
       line_ranges: boundedMatchLineRanges(file, matches, anchor.length)
     });
@@ -969,6 +1064,58 @@ export function indexesOf(haystack: Buffer, needle: Buffer): number[] {
   }
 
   return indexes;
+}
+
+export function indexesOfLimited(haystack: Buffer, needle: Buffer, limit = 11): LimitedMatches {
+  if (needle.length === 0) {
+    return { matches: [], truncated: false };
+  }
+
+  const maxMatches = normalizedLimit(limit);
+  const matches: number[] = [];
+  let index = haystack.indexOf(needle);
+  while (index !== -1) {
+    if (matches.length >= maxMatches) {
+      return { matches, truncated: true };
+    }
+    matches.push(index);
+    index = haystack.indexOf(needle, index + 1);
+  }
+
+  return { matches, truncated: false };
+}
+
+function indexesOfLimitedWhere(
+  haystack: Buffer,
+  needle: Buffer,
+  predicate: (start: number) => boolean,
+  limit = 11
+): LimitedMatches {
+  if (needle.length === 0) {
+    return { matches: [], truncated: false };
+  }
+
+  const maxMatches = normalizedLimit(limit);
+  const matches: number[] = [];
+  let index = haystack.indexOf(needle);
+  while (index !== -1) {
+    if (predicate(index)) {
+      if (matches.length >= maxMatches) {
+        return { matches, truncated: true };
+      }
+      matches.push(index);
+    }
+    index = haystack.indexOf(needle, index + 1);
+  }
+
+  return { matches, truncated: false };
+}
+
+function normalizedLimit(limit: number): number {
+  if (!Number.isFinite(limit)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(0, Math.trunc(limit));
 }
 
 export function rangesOverlap(left: ByteRange, right: ByteRange): boolean {
@@ -1096,22 +1243,55 @@ function sameMemoryFile(files: Map<string, InMemoryFileState>, left: string, rig
   return leftFile !== undefined && rightFile !== undefined && leftFile.identity === rightFile.identity;
 }
 
-export async function writeAtomic(path: string, bytes: Buffer): Promise<void> {
-  await writeAtomically([{ path, bytes }]);
+export async function writeAtomic(
+  path: string,
+  bytes: Buffer,
+  options: AtomicWriteOptions = {}
+): Promise<void> {
+  await writeAtomically([
+    {
+      path,
+      bytes,
+      create: options.create,
+      expected: options.expected,
+      label: options.label
+    }
+  ]);
 }
 
-async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
+async function writeAtomically(
+  writes: AtomicWriteRequest[],
+  deletes: AtomicDeleteRequest[] = []
+): Promise<void> {
   const staged: StagedAtomicWrite[] = [];
 
   try {
     for (const write of writes) {
-      staged.push(await stageAtomicWrite(write.path, write.bytes, write.create === true));
+      staged.push(await stageAtomicWrite(write));
     }
+    const decisions = [];
     for (const write of staged) {
+      decisions.push(await verifyStagedWrite(write));
+    }
+    for (const deletion of deletes) {
+      await verifyAtomicDelete(deletion);
+    }
+    for (const [index, write] of staged.entries()) {
+      if (decisions[index] === "skip") {
+        await unlink(write.temp).catch(() => undefined);
+        continue;
+      }
       try {
         await rename(write.temp, write.path);
       } catch (error) {
         failFileSystem(error, write.path, "Could not replace file");
+      }
+    }
+    for (const deletion of deletes) {
+      try {
+        await unlink(deletion.path);
+      } catch (error) {
+        failFileSystem(error, deletion.path, "Could not remove file");
       }
     }
   } catch (error) {
@@ -1120,13 +1300,93 @@ async function writeAtomically(writes: AtomicWriteRequest[]): Promise<void> {
   }
 }
 
-async function stageAtomicWrite(path: string, bytes: Buffer, create = false): Promise<StagedAtomicWrite> {
+type StagedWriteDecision = "rename" | "skip";
+
+async function verifyStagedWrite(write: StagedAtomicWrite): Promise<StagedWriteDecision> {
+  const expected = write.request.expected;
+  if (expected === undefined) {
+    return "rename";
+  }
+  if (expected.kind === "missing") {
+    const current = await readFileSnapshotOptional(write.path, expected.label);
+    if (current === undefined) {
+      return "rename";
+    }
+    if (expected.bytesIfExists !== undefined && current.bytes.equals(expected.bytesIfExists)) {
+      return "skip";
+    }
+    failConcurrentModification(expected.label);
+  }
+
+  const current = await readFileSnapshotOptional(write.path, expected.label);
+  if (current === undefined || !sameFileSnapshot(expected.snapshot, current)) {
+    failConcurrentModification(expected.label);
+  }
+  return "rename";
+}
+
+async function verifyAtomicDelete(deletion: AtomicDeleteRequest): Promise<void> {
+  const expected = deletion.expected;
+  if (expected === undefined) {
+    return;
+  }
+  if (expected.kind === "missing") {
+    const current = await readFileSnapshotOptional(deletion.path, expected.label);
+    if (current === undefined) {
+      return;
+    }
+    failConcurrentModification(expected.label);
+  }
+
+  const current = await readFileSnapshotOptional(deletion.path, expected.label);
+  if (current === undefined || !sameFileSnapshot(expected.snapshot, current)) {
+    failConcurrentModification(expected.label);
+  }
+}
+
+async function readFileSnapshotOptional(path: string, label: string): Promise<FileSnapshot | undefined> {
+  try {
+    return await readFileSnapshot(path, "current file");
+  } catch (error) {
+    if (error instanceof BlockPatchError && error.code === "file_not_found") {
+      return undefined;
+    }
+    if (error instanceof BlockPatchError && error.code === "not_regular_file") {
+      failConcurrentModification(label);
+    }
+    throw error;
+  }
+}
+
+function sameFileSnapshot(left: FileSnapshot, right: FileSnapshot): boolean {
+  return left.sha256 === right.sha256 && sameStatSnapshot(left.stat, right.stat);
+}
+
+function sameStatSnapshot(left: FileStatSnapshot, right: FileStatSnapshot): boolean {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+function failConcurrentModification(label: string): never {
+  fail("concurrent_modification", `File changed after blockpatch verified its input: ${label}`, {
+    path: label,
+    phase: "write"
+  });
+}
+
+async function stageAtomicWrite(write: AtomicWriteRequest): Promise<StagedAtomicWrite> {
   let mode: number | undefined;
   let createMissing = false;
-  if (create) {
-    const info = await statOptional(path);
+  if (write.create === true) {
+    const info = await statOptional(write.path);
     if (info !== undefined) {
-      assertRegularFile(info, path, "output file");
+      assertExpectedRegularFile(info, write.path, "output file", write.expected);
       mode = info.mode;
     }
     if (mode === undefined) {
@@ -1134,29 +1394,47 @@ async function stageAtomicWrite(path: string, bytes: Buffer, create = false): Pr
       mode = 0o644;
     }
   } else {
-    const info = await statChecked(path, "output file");
-    assertRegularFile(info, path, "output file");
+    const info = await statOptional(write.path);
+    if (info === undefined) {
+      if (write.expected !== undefined) {
+        failConcurrentModification(write.expected.label);
+      }
+      fail("file_not_found", `Could not stat output file: ${write.path}`, { path: write.path, phase: "io" });
+    }
+    assertExpectedRegularFile(info, write.path, "output file", write.expected);
     mode = info.mode;
   }
 
-  const dir = dirname(path);
-  const base = basename(path);
+  const dir = dirname(write.path);
+  const base = basename(write.path);
   const temp = join(dir, `.${base}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
 
   try {
     if (createMissing) {
       await mkdir(dir, { recursive: true });
     }
-    await writeFile(temp, bytes, { flag: "wx" });
+    await writeFile(temp, write.bytes, { flag: "wx" });
     if (mode !== undefined) {
       await chmod(temp, mode);
     }
   } catch (error) {
     await unlink(temp).catch(() => undefined);
-    failFileSystem(error, path, "Could not stage file replacement");
+    failFileSystem(error, write.path, "Could not stage file replacement");
   }
 
-  return { path, temp };
+  return { path: write.path, temp, request: write };
+}
+
+function assertExpectedRegularFile(
+  info: Stats,
+  path: string,
+  label: string,
+  expected: AtomicPathExpectation | undefined
+): void {
+  if (!info.isFile() && expected !== undefined) {
+    failConcurrentModification(expected.label);
+  }
+  assertRegularFile(info, path, label);
 }
 
 async function statOptional(path: string) {

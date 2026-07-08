@@ -294,6 +294,33 @@ describe("moveBlock API", () => {
     ).rejects.toThrow("destination path contains unsupported control characters");
   });
 
+  test("rejects Windows-style separators in paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-backslash-path-"));
+    await expect(
+      moveBlock(
+        {
+          src: "src\\source.ts",
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("source path must use POSIX-style / separators");
+
+    await expect(
+      moveBlock(
+        {
+          src: "/dev/null",
+          dst: "src\\target.ts",
+          payload: "inserted\n",
+          target_before: "anchor\n"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("destination path must use POSIX-style / separators");
+  });
+
   test("rejects symlink src paths", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-symlink-"));
     const realPath = join(cwd, "real.ts");

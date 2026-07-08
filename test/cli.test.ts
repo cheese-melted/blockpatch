@@ -1482,10 +1482,12 @@ describe("CLI", () => {
       ok: boolean;
       error: {
         code: string;
+        message: string;
         path: string;
         phase: string;
         anchor: string;
         matches: number;
+        matches_truncated: boolean;
         ranges: Array<{ start: number; end: number }>;
         line_ranges: Array<{ start: number; end: number }>;
       };
@@ -1497,8 +1499,10 @@ describe("CLI", () => {
       path: "source.ts",
       phase: "target",
       anchor: "target_before",
-      matches: 12
+      matches: 11,
+      matches_truncated: true
     });
+    expect(stderr.error.message).toContain("matched at least 11 locations");
     expect(stderr.error.ranges).toHaveLength(10);
     expect(stderr.error.ranges[0]).toEqual({
       start: firstTargetStart,

@@ -19,6 +19,7 @@ export type BlockPatchErrorCode =
   | "target_not_found"
   | "target_ambiguous"
   | "destination_exists"
+  | "concurrent_modification"
   | "payload_mismatch"
   | "hash_mismatch"
   | "invalid_utf8"
@@ -39,6 +40,7 @@ export interface BlockPatchErrorDetails {
   phase?: string;
   anchor?: string;
   matches?: number;
+  matches_truncated?: boolean;
   ranges?: BlockPatchErrorRange[];
   line_ranges?: BlockPatchErrorRange[];
 }
@@ -59,6 +61,17 @@ export class BlockPatchError extends Error {
 
 export function fail(code: BlockPatchErrorCode, message: string, details?: BlockPatchErrorDetails): never {
   throw new BlockPatchError(code, message, details);
+}
+
+export function matchedLocations(count: number, truncated: boolean): string {
+  return `matched ${truncated ? "at least " : ""}${count} locations`;
+}
+
+export function matchCountDetails(
+  count: number,
+  truncated: boolean
+): Pick<BlockPatchErrorDetails, "matches" | "matches_truncated"> {
+  return truncated ? { matches: count, matches_truncated: true } : { matches: count };
 }
 
 export function boundedMatchRanges(matches: Iterable<number>, byteLength: number): BlockPatchErrorRange[] {

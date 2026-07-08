@@ -86,6 +86,7 @@ export interface BlockPatchJsonError {
     phase?: string;
     anchor?: string;
     matches?: number;
+    matches_truncated?: boolean;
     ranges?: ByteRangeResult[];
     line_ranges?: ByteRangeResult[];
   };

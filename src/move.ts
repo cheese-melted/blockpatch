@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { TextDecoder } from "node:util";
-import { boundedLineRanges, boundedRanges, fail } from "./errors";
-import { readFileChecked } from "./files";
+import { boundedLineRanges, boundedRanges, fail, matchCountDetails, matchedLocations } from "./errors";
+import { readFileChecked, readFileSnapshot } from "./files";
 import {
   applyPatchBytes,
   buildMoveSelection,
   checkPatchBytesInMemory,
   commitMove,
   findTargetSelection,
-  indexesOf,
+  indexesOfLimited,
   moveResultDetails,
   unique,
   writeAtomic,
@@ -69,6 +69,11 @@ type NormalizedMoveBlockArgs =
   | NormalizedFileCreationArgs
   | NormalizedFileRemovalArgs;
 
+interface LimitedRanges {
+  ranges: ByteRange[];
+  truncated: boolean;
+}
+
 const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   src: "string",
   src_start: "string",
@@ -108,8 +113,10 @@ export async function moveBlock(
   const srcPath = resolvePath(cwd, normalized.src, "source path");
   const dstPath = resolvePath(cwd, normalized.dst, "destination path");
   const sameFile = await sameFileIdentity(srcPath, dstPath);
-  const srcOriginal = await readFileChecked(srcPath, "source file");
-  const dstOriginal = sameFile ? srcOriginal : await readFileChecked(dstPath, "destination file");
+  const srcSnapshot = await readFileSnapshot(srcPath, "source file");
+  const dstSnapshot = sameFile ? srcSnapshot : await readFileSnapshot(dstPath, "destination file");
+  const srcOriginal = srcSnapshot.bytes;
+  const dstOriginal = dstSnapshot.bytes;
   const source = findSource(srcOriginal, normalized);
   const target = findTargetSelection(dstOriginal, normalized.targetBefore, normalized.targetAfter, normalized.dst, {
     phase: "target",
@@ -135,6 +142,8 @@ export async function moveBlock(
     dryRun: writeSuppressed,
     srcOriginal,
     dstOriginal,
+    srcSnapshot,
+    dstSnapshot,
     selection,
     srcLabel: normalized.src,
     dstLabel: normalized.dst
@@ -409,7 +418,8 @@ async function insertPayload(
   options: MoveBlockOptions
 ): Promise<MoveBlockResult> {
   const dstPath = resolvePath(cwd, args.dst, "destination path");
-  const original = await readFileChecked(dstPath, "destination file");
+  const snapshot = await readFileSnapshot(dstPath, "destination file");
+  const original = snapshot.bytes;
   const payloadSha256 = createHash("sha256").update(args.payload).digest("hex");
   verifyExpectedPayloadHash(validated, payloadSha256);
 
@@ -454,7 +464,9 @@ async function insertPayload(
   const changed = next.equals(original) ? [] : [args.dst];
 
   if (!writeSuppressed && changed.length > 0) {
-    await writeAtomic(dstPath, next);
+    await writeAtomic(dstPath, next, {
+      expected: { kind: "file", label: args.dst, snapshot }
+    });
   }
 
   return {
@@ -495,18 +507,19 @@ function findAlreadyAppliedTarget(
   dstLabel: string
 ): TargetSelection | undefined {
   const alreadyApplied = Buffer.concat([args.targetBefore, args.payload, args.targetAfter]);
-  const matches = indexesOf(file, alreadyApplied);
+  const matchResult = indexesOfLimited(file, alreadyApplied);
+  const matches = matchResult.matches;
 
   if (matches.length === 0) {
     return undefined;
   }
-  if (matches.length > 1) {
+  if (matches.length > 1 || matchResult.truncated) {
     const ranges = boundedRanges(matches.map((start) => ({ start, end: start + alreadyApplied.length })));
-    fail("target_ambiguous", `Already-applied target is ambiguous in ${dstLabel}; matched ${matches.length} locations`, {
+    fail("target_ambiguous", `Already-applied target is ambiguous in ${dstLabel}; ${matchedLocations(matches.length, matchResult.truncated)}`, {
       path: dstLabel,
       phase: "target",
       anchor: "target_before+payload+target_after",
-      matches: matches.length,
+      ...matchCountDetails(matches.length, matchResult.truncated),
       ranges,
       line_ranges: boundedLineRanges(file, ranges)
     });
@@ -527,7 +540,8 @@ async function deletePayload(
   options: MoveBlockOptions
 ): Promise<MoveBlockResult> {
   const srcPath = resolvePath(cwd, args.src, "source path");
-  const original = await readFileChecked(srcPath, "source file");
+  const snapshot = await readFileSnapshot(srcPath, "source file");
+  const original = snapshot.bytes;
   const source = findSource(original, args);
   const payload = Buffer.from(original.subarray(source.start, source.end));
   const payloadSha256 = createHash("sha256").update(payload).digest("hex");
@@ -540,7 +554,9 @@ async function deletePayload(
   const changed = next.equals(original) ? [] : [args.src];
 
   if (!writeSuppressed && changed.length > 0) {
-    await writeAtomic(srcPath, next);
+    await writeAtomic(srcPath, next, {
+      expected: { kind: "file", label: args.src, snapshot }
+    });
   }
 
   return {
@@ -566,16 +582,8 @@ async function deletePayload(
 }
 
 function findSource(file: Buffer, args: NormalizedRelocationArgs | NormalizedDeletionArgs): ByteRange {
-  const startMatches = indexesOf(file, args.srcStart);
-  const ranges: ByteRange[] = [];
-
-  for (const start of startMatches) {
-    const searchFrom = start + args.srcStart.length;
-    const endStart = file.indexOf(args.srcEnd, searchFrom);
-    if (endStart !== -1) {
-      ranges.push({ start, end: endStart + args.srcEnd.length });
-    }
-  }
+  const result = findDelimitedRanges(file, args.srcStart, args.srcEnd);
+  const ranges = result.ranges;
 
   if (ranges.length === 0) {
     fail("source_not_found", `Source delimiters were not found in ${args.src}`, {
@@ -585,18 +593,48 @@ function findSource(file: Buffer, args: NormalizedRelocationArgs | NormalizedDel
       matches: 0
     });
   }
-  if (ranges.length > 1) {
-    fail("source_ambiguous", `Source delimiters are ambiguous in ${args.src}; matched ${ranges.length} locations`, {
+  if (ranges.length > 1 || result.truncated) {
+    fail("source_ambiguous", `Source delimiters are ambiguous in ${args.src}; ${matchedLocations(ranges.length, result.truncated)}`, {
       path: args.src,
       phase: "source",
       anchor: "src_start/src_end",
-      matches: ranges.length,
+      ...matchCountDetails(ranges.length, result.truncated),
       ranges: boundedRanges(ranges),
       line_ranges: boundedLineRanges(file, ranges)
     });
   }
 
   return ranges[0];
+}
+
+function findDelimitedRanges(file: Buffer, startNeedle: Buffer, endNeedle: Buffer, limit = 11): LimitedRanges {
+  if (startNeedle.length === 0) {
+    return { ranges: [], truncated: false };
+  }
+
+  const maxMatches = normalizedLimit(limit);
+  const ranges: ByteRange[] = [];
+  let start = file.indexOf(startNeedle);
+  while (start !== -1) {
+    const searchFrom = start + startNeedle.length;
+    const endStart = file.indexOf(endNeedle, searchFrom);
+    if (endStart !== -1) {
+      if (ranges.length >= maxMatches) {
+        return { ranges, truncated: true };
+      }
+      ranges.push({ start, end: endStart + endNeedle.length });
+    }
+    start = file.indexOf(startNeedle, start + 1);
+  }
+
+  return { ranges, truncated: false };
+}
+
+function normalizedLimit(limit: number): number {
+  if (!Number.isFinite(limit)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(0, Math.trunc(limit));
 }
 
 function targetAnchorName(args: NormalizedRelocationArgs | NormalizedInsertionArgs): string {

@@ -8,11 +8,21 @@ export function validateOperationPath(path: string, label: string): void {
     fail("invalid_path", `Invalid ${label}: ${path}`, { path, phase: "path" });
   }
   rejectUnsafeDisplayPath(path, label);
+  rejectBackslashPath(path, label);
 }
 
 export function rejectUnsafeDisplayPath(path: string, label: string): void {
   if (/[\r\n\t]/.test(path)) {
     fail("invalid_path", `${label} contains unsupported control characters: ${path}`, {
+      path,
+      phase: "path"
+    });
+  }
+}
+
+function rejectBackslashPath(path: string, label: string): void {
+  if (path.includes("\\")) {
+    fail("invalid_path", `${label} must use POSIX-style / separators: ${path}`, {
       path,
       phase: "path"
     });

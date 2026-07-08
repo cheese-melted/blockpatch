@@ -1,7 +1,23 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { lstatSync, realpathSync, type Stats } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { BlockPatchError, fail, type BlockPatchErrorCode } from "./errors";
+
+export interface FileStatSnapshot {
+  dev: number;
+  ino: number;
+  mode: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+export interface FileSnapshot {
+  bytes: Buffer;
+  sha256: string;
+  stat: FileStatSnapshot;
+}
 
 export async function readFileChecked(path: string, label: string): Promise<Buffer> {
   try {
@@ -9,6 +25,25 @@ export async function readFileChecked(path: string, label: string): Promise<Buff
   } catch (error) {
     failFileSystem(error, path, `Could not read ${label}`);
   }
+}
+
+export async function readFileSnapshot(path: string, label: string): Promise<FileSnapshot> {
+  const bytes = await readFileChecked(path, label);
+  const info = await statChecked(path, label);
+  assertRegularFile(info, path, label);
+  return fileSnapshot(bytes, info);
+}
+
+export function fileSnapshot(bytes: Buffer, info: Stats): FileSnapshot {
+  return {
+    bytes,
+    sha256: hashBytes(bytes),
+    stat: statSnapshot(info)
+  };
+}
+
+export function hashBytes(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 export async function statChecked(path: string, label: string): Promise<Stats> {
@@ -48,6 +83,17 @@ export function failFileSystem(error: unknown, path: string, action: string, pha
 
   const message = error instanceof Error ? `${action}: ${error.message}` : `${action}: ${path}`;
   fail(fileSystemErrorCode(error), message, { path, phase });
+}
+
+function statSnapshot(info: Stats): FileStatSnapshot {
+  return {
+    dev: info.dev,
+    ino: info.ino,
+    mode: info.mode,
+    size: info.size,
+    mtimeMs: info.mtimeMs,
+    ctimeMs: info.ctimeMs
+  };
 }
 
 function fileSystemErrorCode(error: unknown): BlockPatchErrorCode {

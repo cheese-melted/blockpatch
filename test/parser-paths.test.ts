@@ -276,6 +276,30 @@ describe("format hardening", () => {
     );
   });
 
+  test("patch operation paths must use POSIX separators", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-backslash-path-"));
+    const payload = "inserted bytes\n";
+    const sha = createHash("sha256").update(payload).digest("hex");
+    const dst = "src\\new.txt";
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      [
+        `diff --blockpatch /dev/null b/${dst}`,
+        "blockpatch version 1",
+        `blockpatch move id=move-1 payload-sha256=${sha}`,
+        "--- /dev/null",
+        `+++ b/${dst}`,
+        "",
+        "@@ -0,0 +1,1 @@ blockpatch-target id=move-1",
+        "+inserted bytes"
+      ].join("\n") + "\n"
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must use POSIX-style / separators"
+    );
+  });
+
   test("missing patch files report structured JSON errors", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-missing-patch-"));
     const proc = Bun.spawn({
