@@ -1,0 +1,12 @@
+{
+  "expect": "pass",
+  "patch": "diff --blockpatch a/source.txt b/source.txt\nblockpatch version 1\nblockpatch move id=move-1 role=source payload-sha256=a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6\n--- a/source.txt\n+++ b/source.txt\n\n@@ -1,5 +1,2 @@ blockpatch-source id=move-1\n alpha()\n-function movedThing() {\n-  return 42;\n-}\n omega()\n\ndiff --blockpatch a/target.txt b/target.txt\nblockpatch version 1\nblockpatch move id=move-1 role=target payload-sha256=a990c0da5571138b0e2363af883a399fe214a137ad809c67f6530c618967a4e6\n--- a/target.txt\n+++ b/target.txt\n\n@@ -1,3 +1,6 @@ blockpatch-target id=move-1\n class Target {\n   method() {}\n+function movedThing() {\n+  return 42;\n+}\n }\n",
+  "files": {
+    "source.txt": "alpha()\nfunction movedThing() {\n  return 42;\n}\nomega()\n",
+    "target.txt": "class Target {\n  method() {}\n}\n"
+  },
+  "expected_files": {
+    "source.txt": "alpha()\nomega()\n",
+    "target.txt": "class Target {\n  method() {}\nfunction movedThing() {\n  return 42;\n}\n}\n"
+  }
+}

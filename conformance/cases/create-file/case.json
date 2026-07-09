@@ -1,0 +1,8 @@
+{
+  "expect": "pass",
+  "patch": "diff --blockpatch /dev/null b/file.txt\nblockpatch version 1\nblockpatch move id=move-1 payload-sha256=072a398e62ad50e40613b98e57f3e3236a471dcbd7c2b9f190440c22adc16a0f\n--- /dev/null\n+++ b/file.txt\n\n@@ -0,0 +1,1 @@ blockpatch-target id=move-1\n+created file\n",
+  "files": {},
+  "expected_files": {
+    "file.txt": "created file\n"
+  }
+}

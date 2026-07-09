@@ -143,6 +143,7 @@ When using `--cwd`, operation paths inside patches and move JSON are relative to
 - [Commands](docs/commands.md): supported CLI forms and flags.
 - [Patch spec](docs/spec.md): canonical `.blockpatch` artifact format, hunk syntax, `/dev/null`, byte rules, move JSON requests, JSON output, and error codes.
 - [Behavior](docs/behavior.md): exact matching, idempotence, path containment, failure rules, and write behavior.
+- [Conformance](conformance/): runnable `.blockpatch` cases for checking another implementation.
 
 ## Examples
 
@@ -156,6 +157,16 @@ When using `--cwd`, operation paths inside patches and move JSON are relative to
 - [failure: ambiguous target](examples/failure-ambiguous-target/)
 
 Each example has a `patch.blockpatch`, a runnable `work/` directory, and `expected/` output for successful cases.
+
+## Conformance
+
+Run the published conformance cases against a blockpatch-compatible CLI:
+
+```sh
+npx -p blockpatch blockpatch-conformance ./my-implementation
+```
+
+The runner checks apply/check behavior, retry idempotence, reverse application, byte preservation, and expected structured failures.
 
 ## Scope
 

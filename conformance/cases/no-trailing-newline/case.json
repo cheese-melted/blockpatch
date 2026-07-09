@@ -1,0 +1,10 @@
+{
+  "expect": "pass",
+  "patch": "diff --blockpatch a/file.txt b/file.txt\nblockpatch version 1\nblockpatch move id=move-1 payload-sha256=f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e\n--- a/file.txt\n+++ b/file.txt\n\n@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n\n@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n+move me\n target\n\\ No newline at end of file\n",
+  "files": {
+    "file.txt": "alpha\nmove me\nomega\ntarget"
+  },
+  "expected_files": {
+    "file.txt": "alpha\nomega\nmove me\ntarget"
+  }
+}

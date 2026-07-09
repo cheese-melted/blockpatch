@@ -22,12 +22,14 @@
     "agent"
   ],
   "bin": {
-    "blockpatch": "dist/cli.js"
+    "blockpatch": "dist/cli.js",
+    "blockpatch-conformance": "conformance/runner.mjs"
   },
   "files": [
     "dist",
     "docs",
     "examples",
+    "conformance",
     "README.md",
     "CONTRIBUTING.md",
     "LICENSE"
@@ -37,7 +39,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && bun build ./src/cli.ts --target=node --outdir=dist",
     "smoke:dist": "node test/built-cli-smoke.mjs",
-    "prepublishOnly": "bun run typecheck && bun test && bun run build && npm run smoke:dist",
+    "smoke:pack": "node test/packed-cli-smoke.mjs",
+    "conformance": "node conformance/runner.mjs node dist/cli.js",
+    "prepublishOnly": "bun run typecheck && bun test && bun run build && npm run smoke:dist && npm run smoke:pack",
     "pack:dry": "npm pack --dry-run",
     "publish:dry": "npm publish --dry-run"
   },
