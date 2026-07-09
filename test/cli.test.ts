@@ -1138,6 +1138,33 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
   });
 
+  test("plan rejects redundant dry-run and diff flags", async () => {
+    for (const flag of ["--dry-run", "--diff"]) {
+      const proc = Bun.spawn({
+        cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "plan", flag, "--json", "-"],
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+      proc.stdin.write("{}");
+      proc.stdin.end();
+
+      expect(await proc.exited).toBe(1);
+      expect(await new Response(proc.stdout).text()).toBe("");
+      const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+        ok: boolean;
+        error: { code: string; message: string };
+      };
+      expect(stderr).toMatchObject({
+        ok: false,
+        error: {
+          code: "invalid_option",
+          message: `plan does not accept redundant ${flag}`
+        }
+      });
+    }
+  });
+
   test("empty move JSON reports the expected request shape", async () => {
     const cwd = await moveFixture();
     const proc = Bun.spawn({

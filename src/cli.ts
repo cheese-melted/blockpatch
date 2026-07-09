@@ -404,10 +404,12 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
       continue;
     }
     if (matchesFlag(arg, DRY_RUN_FLAG_DEFINITION)) {
+      rejectPlanNoopFlag(command, arg);
       options.dryRun = true;
       continue;
     }
     if (matchesFlag(arg, DIFF_FLAG_DEFINITION)) {
+      rejectPlanNoopFlag(command, arg);
       options.diff = true;
       continue;
     }
@@ -463,6 +465,12 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
   }
 
   return options;
+}
+
+function rejectPlanNoopFlag(command: "move" | "plan", flag: string): void {
+  if (command === "plan") {
+    throw new BlockPatchError("invalid_option", `plan does not accept redundant ${flag}`);
+  }
 }
 
 function argToMoveKey(arg: string): keyof MoveBlockArgs | undefined {
