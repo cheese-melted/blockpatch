@@ -10,6 +10,8 @@ export function validateOperationPath(path: string, label: string): void {
   rejectUnsafeDisplayPath(path, label);
   rejectAbsolutePath(path, label);
   rejectBackslashPath(path, label);
+  rejectEmptyPathSegments(path, label);
+  rejectDotPathSegments(path, label);
 }
 
 export function rejectUnsafeDisplayPath(path: string, label: string): void {
@@ -39,6 +41,15 @@ function rejectAbsolutePath(path: string, label: string): void {
   }
 }
 
+function rejectEmptyPathSegments(path: string, label: string): void {
+  if (path.split("/").some((part) => part === "")) {
+    fail("invalid_path", `${label} must not contain empty path segments: ${path}`, {
+      path,
+      phase: "path"
+    });
+  }
+}
+
 function rejectDotPathSegments(path: string, label: string): void {
   if (path.split("/").some((part) => part === "." || part === "..")) {
     fail("invalid_path", `${label} must not contain . or .. path segments: ${path}`, {
@@ -59,7 +70,6 @@ export function resolvePath(cwd: string, path: string, label: string): string {
   if (!isInside(root, resolved)) {
     fail("path_outside_cwd", `${label} escapes the working directory: ${path}`, { path, phase: "path" });
   }
-  rejectDotPathSegments(path, label);
 
   rejectSymlinkComponents(root, resolved, path, label);
 
@@ -89,7 +99,6 @@ export function resolvePathAllowMissing(
   if (!isInside(root, resolved)) {
     fail("path_outside_cwd", `${label} escapes the working directory: ${path}`, { path, phase: "path" });
   }
-  rejectDotPathSegments(path, label);
 
   const deepestExisting = rejectExistingSymlinkComponents(root, resolved, path, label);
   if (deepestExisting !== resolved) {

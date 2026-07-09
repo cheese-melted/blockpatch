@@ -306,7 +306,7 @@ describe("moveBlock API", () => {
         },
         { cwd }
       )
-    ).rejects.toThrow("escapes the working directory");
+    ).rejects.toThrow("source path must not contain . or .. path segments");
   });
 
   test("rejects absolute src paths", async () => {
@@ -436,6 +436,45 @@ describe("moveBlock API", () => {
         { cwd }
       )
     ).rejects.toThrow("destination path must not contain . or .. path segments");
+  });
+
+  test("rejects empty path segments in paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-empty-segment-path-"));
+    await expect(
+      moveBlock(
+        {
+          src: "src//source.ts",
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("source path must not contain empty path segments");
+
+    await expect(
+      moveBlock(
+        {
+          src: "source.ts/",
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("source path must not contain empty path segments");
+
+    await expect(
+      moveBlock(
+        {
+          src: "/dev/null",
+          dst: "nested//target.ts",
+          payload: "inserted\n",
+          target_before: "anchor\n"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("destination path must not contain empty path segments");
   });
 
   test("rejects Windows-style separators in paths", async () => {
