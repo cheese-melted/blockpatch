@@ -42,6 +42,15 @@ export interface MoveResultDetails {
   insert_index: number | null;
 }
 
+export interface MoveWarning {
+  code: "adjacent_bytes";
+  message: string;
+  path: string;
+  phase: "target";
+  boundary: "target_before+payload" | "payload+target_after";
+  suggested_action: string;
+}
+
 export type ApplyStatus = "applied" | "noop" | "already_applied";
 
 export interface ApplyResult {
@@ -74,6 +83,7 @@ export interface MoveBlockOptions {
 
 export interface MoveBlockResult extends ApplyResult {
   patch?: string;
+  warnings?: MoveWarning[];
 }
 
 export interface BlockPatchJsonError {

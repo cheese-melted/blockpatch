@@ -73,6 +73,10 @@ blockpatch move --src src/foo.ts --src-start $'\nfunction removeMe() {' --src-en
 
 Each flag sets the move JSON field of the same name and cannot be combined with `--json`. `mode` has no flag form, so whole-file `create_file`/`remove_file` requests are JSON-only. JSON avoids shell quoting problems, so it is usually the more reliable form for agents.
 
+`--target-before` means “this exact context is before the insertion point,” so the payload is inserted after that context. `--target-after` means “this exact context is after the insertion point,” so the payload is inserted before that context. These names describe the anchor's relationship to the insertion point; they do not mean “insert before this text” or “insert after this text.”
+
+`--src-start`, `--src-end`, `--target-before`, and `--target-after` are byte-exact and newline-sensitive. `src_start`/`src_end` select bytes from the beginning of `src_start` through the end of the first following `src_end`. `blockpatch` does not add separators, so include the newlines you want moved or inserted. If `target_before` does not end with `\n` and the payload does not start with `\n`, they will be joined directly.
+
 ## Output
 
 ```sh

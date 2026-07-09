@@ -212,6 +212,8 @@ Request shapes:
 - `payload` is only valid when `src` is `/dev/null`; it must be non-empty for in-file insertion.
 - `expected_payload_sha256` is optional.
 
+`src_start`, `src_end`, `target_before`, and `target_after` are byte-exact and newline-sensitive. Source selection starts at `src_start` and ends after the first following `src_end`; include any leading or trailing newline you want in the selected payload. `target_before` is the exact context before the insertion point, so insertion occurs after it. `target_after` is the exact context after the insertion point, so insertion occurs before it. `blockpatch` never inserts extra newlines or spacing between anchors and payload.
+
 Insertion:
 
 ```json
@@ -272,6 +274,14 @@ type ApplyResult = {
   status: "applied" | "noop" | "already_applied"
   strip_components?: number
   patch?: string
+  warnings?: Array<{
+    code: "adjacent_bytes"
+    message: string
+    path: string
+    phase: "target"
+    boundary: "target_before+payload" | "payload+target_after"
+    suggested_action: string
+  }>
   moves: Array<{
     id: string
     src: string
@@ -289,7 +299,7 @@ type ApplyResult = {
 
 `status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the command can prove the requested final state is already present. `strip_components` is present for `check` and `apply` JSON success output and reports the effective `-p` path-stripping count; it defaults to `1`.
 
-`patch` is present when `move --diff --json-output` is used. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`.
+`patch` is present when `move --diff --json-output` is used. `warnings` is present when a move validates but may surprise a caller, such as an insertion boundary where neither side contains a newline and the bytes will be joined directly. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`.
 
 With `--json-output`, errors print:
 

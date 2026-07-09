@@ -164,7 +164,13 @@ export async function moveBlock(
         selection
       })
     ],
-    patch
+    patch,
+    warnings: insertionBoundaryWarnings(
+      normalized.dst,
+      normalized.targetBefore,
+      selection.payload,
+      normalized.targetAfter
+    )
   };
 }
 
@@ -487,8 +493,52 @@ async function insertPayload(
         insert_index: target.insertIndex
       }
     ],
-    patch: renderedPatch
+    patch: renderedPatch,
+    warnings: insertionBoundaryWarnings(args.dst, args.targetBefore, args.payload, args.targetAfter)
   };
+}
+
+function insertionBoundaryWarnings(
+  path: string,
+  targetBefore: Buffer,
+  payload: Buffer,
+  targetAfter: Buffer
+): MoveBlockResult["warnings"] {
+  const warnings: MoveBlockResult["warnings"] = [];
+
+  if (targetBefore.length > 0 && payload.length > 0 && !endsWithLf(targetBefore) && !startsWithLf(payload)) {
+    warnings.push({
+      code: "adjacent_bytes",
+      message:
+        "Insertion will place payload immediately after target_before with no newline or separator inserted by blockpatch",
+      path,
+      phase: "target",
+      boundary: "target_before+payload",
+      suggested_action: "include the intended newline in target_before or at the start of payload"
+    });
+  }
+
+  if (payload.length > 0 && targetAfter.length > 0 && !endsWithLf(payload) && !startsWithLf(targetAfter)) {
+    warnings.push({
+      code: "adjacent_bytes",
+      message:
+        "Insertion will place target_after immediately after payload with no newline or separator inserted by blockpatch",
+      path,
+      phase: "target",
+      boundary: "payload+target_after",
+      suggested_action: "include the intended newline at the end of payload or at the start of target_after"
+    });
+  }
+
+  return warnings.length > 0 ? warnings : undefined;
+}
+
+function startsWithLf(bytes: Buffer): boolean {
+  return bytes[0] === 0x0a;
+}
+
+function endsWithLf(bytes: Buffer): boolean {
+  return bytes[bytes.length - 1] === 0x0a;
 }
 
 function verifyExpectedPayloadHash(args: MoveBlockArgs, payloadSha256: string): void {

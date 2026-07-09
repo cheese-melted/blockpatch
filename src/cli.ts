@@ -129,11 +129,30 @@ async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
       : await readFileChecked(resolve(options.moveJsonPath), "move JSON file");
 
   try {
-    return JSON.parse(jsonBytes.toString("utf8")) as MoveBlockArgs;
+    const parsed = JSON.parse(jsonBytes.toString("utf8")) as unknown;
+    if (isEmptyObject(parsed)) {
+      throw new BlockPatchError(
+        "invalid_move_args",
+        "Move JSON cannot be empty; provide src plus source selectors or payload and target anchors",
+        {
+          field: "src",
+          suggested_action:
+            "Use fields like src, src_start, src_end, dst, target_before, target_after, payload, or run blockpatch help"
+        }
+      );
+    }
+    return parsed as MoveBlockArgs;
   } catch (error) {
+    if (error instanceof BlockPatchError) {
+      throw error;
+    }
     const message = error instanceof Error ? error.message : String(error);
     throw new BlockPatchError("invalid_json", `Invalid move JSON: ${message}`);
   }
+}
+
+function isEmptyObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value) && Object.keys(value).length === 0;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -460,6 +479,29 @@ Usage:
   blockpatch move --src /dev/null --dst <path> --payload <text> --target-before <text>
   blockpatch move --src <path> --src-start <text> --src-end <text> --dst /dev/null
   blockpatch version
+
+Move JSON fields:
+  src, dst, src_start, src_end, payload, target_before, target_after,
+  expected_payload_sha256, mode, dry_run
+
+Move selection:
+  src_start/src_end are byte-exact, newline-sensitive delimiters. The selected
+  payload starts at src_start and ends after the first following src_end.
+
+Target anchors:
+  target_before is the exact context immediately before the insertion point,
+  so insertion occurs after it. target_after is the exact context immediately
+  after the insertion point, so insertion occurs before it. With both anchors,
+  insertion occurs between them.
+
+Newlines:
+  blockpatch never adds separators. Include every intended newline in
+  src_start/src_end, payload, target_before, or target_after.
+
+Examples:
+  blockpatch move --json - --diff <<'JSON'
+  {"src":"src/a.ts","src_start":"function x() {\\n","src_end":"}\\n","dst":"src/b.ts","target_before":"class B {\\n"}
+  JSON
 `);
 }
 

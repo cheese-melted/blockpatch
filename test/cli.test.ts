@@ -14,6 +14,21 @@ import {
 } from "./helpers";
 
 describe("CLI", () => {
+  test("help explains move JSON anchors and newline behavior", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "--help"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("Move JSON fields:");
+    expect(stdout).toContain("target_before is the exact context immediately before the insertion point");
+    expect(stdout).toContain("blockpatch never adds separators");
+  });
+
   test("supports required check/apply commands", async () => {
     const cwd = await fixtureCase("success");
     const patchPath = join(cwd, "patch.blockpatch");
@@ -815,6 +830,81 @@ describe("CLI", () => {
       }
     });
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
+  test("empty move JSON reports the expected request shape", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write("{}");
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      ok: boolean;
+      error: { code: string; field: string; message: string; suggested_action: string };
+    };
+    expect(stderr).toMatchObject({
+      ok: false,
+      error: {
+        code: "invalid_move_args",
+        field: "src",
+        message: "Move JSON cannot be empty; provide src plus source selectors or payload and target anchors"
+      }
+    });
+    expect(stderr.error.suggested_action).toContain("src_start");
+  });
+
+  test("move JSON warns when target_before and payload will be joined without a newline", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-adjacent-warning-"));
+    await writeFile(join(cwd, "file.txt"), "marker\n");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--dry-run", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "/dev/null",
+        dst: "file.txt",
+        payload: "payload",
+        target_before: "marker"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = JSON.parse(await new Response(proc.stdout).text()) as {
+      ok: boolean;
+      warnings: Array<{
+        code: string;
+        message: string;
+        path: string;
+        phase: string;
+        boundary: string;
+        suggested_action: string;
+      }>;
+    };
+    expect(stdout.ok).toBe(true);
+    expect(stdout.warnings).toEqual([
+      {
+        code: "adjacent_bytes",
+        message:
+          "Insertion will place payload immediately after target_before with no newline or separator inserted by blockpatch",
+        path: "file.txt",
+        phase: "target",
+        boundary: "target_before+payload",
+        suggested_action: "include the intended newline in target_before or at the start of payload"
+      }
+    ]);
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("marker\n");
   });
 
   test("move --json accepts expected_payload_sha256", async () => {
