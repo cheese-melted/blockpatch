@@ -132,7 +132,6 @@ Rules for `/dev/null -> file` creation:
 - the target hunk must be whole-file payload: only contiguous `+` payload lines, with no context lines.
 - zero-byte payload is valid and creates an empty file.
 - a missing destination is created, including parent directories; new files are created with mode 0644.
-- replacements preserve the existing file's permission bits; if the existing file mode changes after verification, the write fails as `concurrent_modification`.
 - if the destination already exists with exactly the requested bytes, the result is `already_applied`; if it exists with different bytes, the patch fails.
 
 Rules for `file -> /dev/null` removal:
@@ -170,6 +169,8 @@ Reverse application is exact and non-fuzzy. A payload-only source hunk has no so
 Same-file moves are atomic at file-replacement granularity. Cross-file moves preflight both files and stage all changed temp files before renaming any original. If staging fails, originals are left untouched.
 
 Before renaming or removing a path, `blockpatch` re-checks that every existing file still matches the bytes and stat captured during planning. For path creation, it re-checks that the destination is still absent or already contains the exact expected bytes. If the live path no longer matches the verified input state, the operation fails with `concurrent_modification`.
+
+Replacements preserve the existing file's permission bits. If an existing file mode changes after verification, the write fails with `concurrent_modification`.
 
 Once renames begin, a two-file operation is not transactional. The destination is renamed before the source, so an interruption can duplicate the payload, but should not delete it from both files. Atomic here means per-file replacement, not a crash-durable multi-file transaction.
 

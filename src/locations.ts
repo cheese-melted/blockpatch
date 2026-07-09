@@ -1,3 +1,5 @@
+import type { Buffer } from "node:buffer";
+
 export interface ByteRangeLike {
   start: number;
   end: number;
