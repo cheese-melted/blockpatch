@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
 const npmShell = process.platform === "win32";
+const executableModeRequired = process.platform !== "win32";
 const smokeRoot = await mkdtemp(join(tmpdir(), "blockpatch-packed-cli-"));
 const packDir = join(smokeRoot, "pack");
 const installRoot = join(smokeRoot, "install");
@@ -59,7 +60,7 @@ async function packPackage() {
   const [packed] = JSON.parse(stdout);
   assert(packed?.filename, "npm pack must report a tarball filename");
   assert(
-    packed.files.some((file) => file.path === "dist/cli.js" && (file.mode & 0o111) !== 0),
+    packed.files.some((file) => file.path === "dist/cli.js" && isExecutablePackEntry(file)),
     "packed dist/cli.js must exist and be executable"
   );
   assert(
@@ -67,13 +68,17 @@ async function packPackage() {
     "packed package.json must exist for version lookup"
   );
   assert(
-    packed.files.some((file) => file.path === "conformance/runner.mjs" && (file.mode & 0o111) !== 0),
+    packed.files.some((file) => file.path === "conformance/runner.mjs" && isExecutablePackEntry(file)),
     "packed conformance runner must exist and be executable"
   );
   const tarballPath = join(packDir, packed.filename);
   await access(tarballPath, constants.R_OK);
   console.log(`ok: npm pack ${packed.filename}`);
   return tarballPath;
+}
+
+function isExecutablePackEntry(file) {
+  return !executableModeRequired || (file.mode & 0o111) !== 0;
 }
 
 async function installPackage(tarballPath) {
