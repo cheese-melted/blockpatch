@@ -345,7 +345,7 @@ function parseSection(
   const oldRawPath = parseFileHeader(text(lines[start + 3]), "---", "a/");
   const newRawPath = parseFileHeader(text(lines[start + 4]), "+++", "b/");
 
-  if (text(lines[start])?.trimEnd() !== `diff --blockpatch ${oldRawPath} ${newRawPath}`) {
+  if (text(lines[start]) !== `diff --blockpatch ${oldRawPath} ${newRawPath}`) {
     fail("parse_error", "diff --blockpatch paths must match the --- and +++ headers");
   }
   validatePatchDeclaredPath(oldRawPath, "--- file header path");
@@ -593,15 +593,18 @@ function parseFileHeader(
   const rawPath = line?.startsWith(marker) === true ? line.slice(marker.length) : undefined;
   if (rawPath !== undefined) {
     rejectUnsafeDisplayPath(rawPath, `${prefix} file header path`);
+    if (rawPath !== rawPath.trim()) {
+      fail("parse_error", `${prefix} file header path must not contain leading or trailing whitespace`);
+    }
   }
-  if (rawPath?.trim() === devNull && line?.startsWith(marker)) {
+  if (rawPath === devNull && line?.startsWith(marker)) {
     return devNull;
   }
   if (line?.startsWith(`${marker}${requiredPathPrefix}`) !== true) {
     fail("parse_error", `Patch must include a ${marker}${requiredPathPrefix}<path> or ${marker}${devNull} header`);
   }
 
-  const path = rawPath?.trim() ?? "";
+  const path = rawPath ?? "";
   if (!path || path === requiredPathPrefix) {
     fail("parse_error", `${prefix} file header must include a path`);
   }

@@ -558,6 +558,42 @@ describe("format hardening", () => {
     );
   });
 
+  test("file header paths may not contain surrounding whitespace", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-header-path-whitespace-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    const patch = patchFor(
+      "move me\n",
+      "file.txt",
+      "file.txt",
+      "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+      "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
+    ).replace("--- a/file.txt", "--- a/file.txt ");
+    await writeFile(join(cwd, "patch.blockpatch"), patch);
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "--- file header path must not contain leading or trailing whitespace"
+    );
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nmove me\nomega\ntarget\n");
+  });
+
+  test("diff header line may not contain trailing whitespace", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-diff-header-whitespace-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    const patch = patchFor(
+      "move me\n",
+      "file.txt",
+      "file.txt",
+      "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+      "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
+    ).replace("diff --blockpatch a/file.txt b/file.txt", "diff --blockpatch a/file.txt b/file.txt ");
+    await writeFile(join(cwd, "patch.blockpatch"), patch);
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must match the --- and +++ headers"
+    );
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nmove me\nomega\ntarget\n");
+  });
+
   test("blank lines inside a hunk body are rejected", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-blank-line-"));
     await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
