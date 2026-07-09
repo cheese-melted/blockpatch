@@ -1517,6 +1517,53 @@ describe("CLI", () => {
     expect(stderr.error.line_ranges[9]).toEqual({ start: 12, end: 12 });
   });
 
+  test("apply --json-output reports partial cross-file duplicate state", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-partial-duplicate-json-"));
+    const payload = "function movedThing() {\n  return 42;\n}\n";
+    await writeFile(join(cwd, "source.ts"), `before\n${payload}after\n`);
+    await writeFile(join(cwd, "target.ts"), "class Target {\n}\n");
+    const planned = await moveBlock(
+      {
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        dst: "target.ts",
+        target_before: "class Target {\n"
+      },
+      { cwd, diff: true }
+    );
+    await writeFile(join(cwd, "target.ts"), `class Target {\n${payload}}\n`);
+    await writeFile(join(cwd, "generated.blockpatch"), planned.patch ?? "");
+
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", join(cwd, "generated.blockpatch"), "--json-output", "--cwd", cwd],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(1);
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      ok: boolean;
+      error: {
+        code: string;
+        source_range: { start: number; end: number };
+        target_range: { start: number; end: number };
+        payload_sha256: string;
+        suggested_action: string;
+      };
+    };
+    expect(stderr).toMatchObject({
+      ok: false,
+      error: {
+        code: "partial_applied_duplicate",
+        source_range: { start: "before\n".length, end: "before\n".length + payload.length },
+        target_range: { start: 0, end: `class Target {\n${payload}}\n`.length },
+        payload_sha256: shaText(payload),
+        suggested_action: "review_then_remove_source"
+      }
+    });
+  });
+
   test("--unsafe-paths is not a supported escape hatch", async () => {
     const cwd = await fixtureCase("success");
     const proc = Bun.spawn({

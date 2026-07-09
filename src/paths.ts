@@ -1,19 +1,20 @@
 import { lstatSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { fail } from "./errors";
 import { assertRegularFile, failFileSystem, lstatSyncChecked, realpathSyncChecked, statChecked } from "./files";
 
 export function validateOperationPath(path: string, label: string): void {
-  if (path === "" || path.includes("\0")) {
+  if (path === "") {
     fail("invalid_path", `Invalid ${label}: ${path}`, { path, phase: "path" });
   }
   rejectUnsafeDisplayPath(path, label);
+  rejectAbsolutePath(path, label);
   rejectBackslashPath(path, label);
 }
 
 export function rejectUnsafeDisplayPath(path: string, label: string): void {
-  if (/[\r\n\t]/.test(path)) {
-    fail("invalid_path", `${label} contains unsupported control characters: ${path}`, {
+  if (/[\x00-\x1f\x7f-\x9f]/u.test(path)) {
+    fail("invalid_path", `${label} contains unsupported control characters`, {
       path,
       phase: "path"
     });
@@ -29,14 +30,26 @@ function rejectBackslashPath(path: string, label: string): void {
   }
 }
 
-export function resolvePath(cwd: string, path: string, label: string): string {
-  validateOperationPath(path, label);
-  if (isAbsolute(path)) {
+function rejectAbsolutePath(path: string, label: string): void {
+  if (isAbsolute(path) || win32.isAbsolute(path)) {
     fail("path_outside_cwd", `${label} must be relative to the working directory: ${path}`, {
       path,
       phase: "path"
     });
   }
+}
+
+function rejectDotPathSegments(path: string, label: string): void {
+  if (path.split("/").some((part) => part === "." || part === "..")) {
+    fail("invalid_path", `${label} must not contain . or .. path segments: ${path}`, {
+      path,
+      phase: "path"
+    });
+  }
+}
+
+export function resolvePath(cwd: string, path: string, label: string): string {
+  validateOperationPath(path, label);
 
   const root = resolve(cwd);
   const resolved = resolve(root, path);
@@ -45,6 +58,7 @@ export function resolvePath(cwd: string, path: string, label: string): string {
   if (!isInside(root, resolved)) {
     fail("path_outside_cwd", `${label} escapes the working directory: ${path}`, { path, phase: "path" });
   }
+  rejectDotPathSegments(path, label);
 
   rejectSymlinkComponents(root, resolved, path, label);
 
@@ -65,12 +79,6 @@ export function resolvePathAllowMissing(
   label: string
 ): { path: string; exists: boolean } {
   validateOperationPath(path, label);
-  if (isAbsolute(path)) {
-    fail("path_outside_cwd", `${label} must be relative to the working directory: ${path}`, {
-      path,
-      phase: "path"
-    });
-  }
 
   const root = resolve(cwd);
   const resolved = resolve(root, path);
@@ -79,6 +87,7 @@ export function resolvePathAllowMissing(
   if (!isInside(root, resolved)) {
     fail("path_outside_cwd", `${label} escapes the working directory: ${path}`, { path, phase: "path" });
   }
+  rejectDotPathSegments(path, label);
 
   const deepestExisting = rejectExistingSymlinkComponents(root, resolved, path, label);
   if (deepestExisting !== resolved) {

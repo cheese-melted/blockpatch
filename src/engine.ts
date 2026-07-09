@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { chmod, lstat, mkdir, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Stats } from "node:fs";
 import {
   BlockPatchError,
@@ -90,10 +90,16 @@ interface AtomicDeleteRequest {
   label?: string;
 }
 
+interface CreatedDirectoryChain {
+  first: string;
+  target: string;
+}
+
 interface StagedAtomicWrite {
   path: string;
   temp: string;
   request: AtomicWriteRequest;
+  createdDirectory: CreatedDirectoryChain | undefined;
 }
 
 export interface InMemoryPatchFile {
@@ -791,6 +797,13 @@ function selectMovePlan(
     };
   }
 
+  if (!sameFile) {
+    const alreadyAppliedTarget = findAlreadyAppliedTargetSelection(dstFile, patch, dstLabel);
+    if (alreadyAppliedTarget !== undefined) {
+      failPartialAppliedDuplicate(srcLabel, dstLabel, patch, source, alreadyAppliedTarget);
+    }
+  }
+
   const target = findTargetSelection(dstFile, targetAnchor.before, targetAnchor.after, dstLabel, {
     phase: "target",
     anchor: "blockpatch-target"
@@ -799,6 +812,28 @@ function selectMovePlan(
     status: "pending",
     selection: buildMoveSelection(srcFile, source, target, sameFile, dstLabel)
   };
+}
+
+function failPartialAppliedDuplicate(
+  srcLabel: string,
+  dstLabel: string,
+  patch: BlockPatch,
+  source: ByteRange,
+  target: TargetSelection
+): never {
+  fail(
+    "partial_applied_duplicate",
+    `Cross-file move appears partially applied: ${dstLabel} already contains the moved payload while ${srcLabel} still contains it`,
+    {
+      path: dstLabel,
+      phase: "target",
+      anchor: "blockpatch-target",
+      source_range: source,
+      target_range: target.range,
+      payload_sha256: patch.payloadSha256,
+      suggested_action: "review_then_remove_source"
+    }
+  );
 }
 
 export function buildMoveSelection(
@@ -1051,21 +1086,6 @@ export function findTargetSelection(
   };
 }
 
-export function indexesOf(haystack: Buffer, needle: Buffer): number[] {
-  if (needle.length === 0) {
-    return [];
-  }
-
-  const indexes: number[] = [];
-  let index = haystack.indexOf(needle);
-  while (index !== -1) {
-    indexes.push(index);
-    index = haystack.indexOf(needle, index + 1);
-  }
-
-  return indexes;
-}
-
 export function indexesOfLimited(haystack: Buffer, needle: Buffer, limit = 11): LimitedMatches {
   if (needle.length === 0) {
     return { matches: [], truncated: false };
@@ -1278,7 +1298,7 @@ async function writeAtomically(
     }
     for (const [index, write] of staged.entries()) {
       if (decisions[index] === "skip") {
-        await unlink(write.temp).catch(() => undefined);
+        await cleanupStagedWrite(write);
         continue;
       }
       try {
@@ -1295,7 +1315,7 @@ async function writeAtomically(
       }
     }
   } catch (error) {
-    await Promise.all(staged.map((write) => unlink(write.temp).catch(() => undefined)));
+    await cleanupStagedWrites(staged);
     throw error;
   }
 }
@@ -1408,21 +1428,94 @@ async function stageAtomicWrite(write: AtomicWriteRequest): Promise<StagedAtomic
   const dir = dirname(write.path);
   const base = basename(write.path);
   const temp = join(dir, `.${base}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  let createdDirectory: CreatedDirectoryChain | undefined;
 
   try {
     if (createMissing) {
-      await mkdir(dir, { recursive: true });
+      const firstCreated = await mkdir(dir, { recursive: true });
+      if (firstCreated !== undefined) {
+        createdDirectory = { first: firstCreated, target: dir };
+      }
     }
+    await assertSafeOutputParentDirectory(dir, write.path);
     await writeFile(temp, write.bytes, { flag: "wx" });
     if (mode !== undefined) {
       await chmod(temp, mode);
     }
   } catch (error) {
-    await unlink(temp).catch(() => undefined);
+    await cleanupStagedWrite({ temp, createdDirectory });
     failFileSystem(error, write.path, "Could not stage file replacement");
   }
 
-  return { path: write.path, temp, request: write };
+  return { path: write.path, temp, request: write, createdDirectory };
+}
+
+async function assertSafeOutputParentDirectory(dir: string, outputPath: string): Promise<void> {
+  let info: Stats;
+  try {
+    info = await lstat(dir);
+  } catch (error) {
+    failFileSystem(error, outputPath, "Could not stat output directory", "path");
+  }
+  if (info.isSymbolicLink()) {
+    fail("symlink_path", `output directory must not be a symbolic link: ${outputPath}`, {
+      path: outputPath,
+      phase: "path"
+    });
+  }
+  if (!info.isDirectory()) {
+    fail("not_regular_file", `output directory must be a directory: ${outputPath}`, {
+      path: outputPath,
+      phase: "path"
+    });
+  }
+}
+
+async function cleanupStagedWrites(staged: StagedAtomicWrite[]): Promise<void> {
+  await Promise.all(staged.map((write) => unlink(write.temp).catch(() => undefined)));
+  for (const write of [...staged].reverse()) {
+    await cleanupCreatedDirectoryChain(write.createdDirectory);
+  }
+}
+
+async function cleanupStagedWrite(write: Pick<StagedAtomicWrite, "temp" | "createdDirectory">): Promise<void> {
+  await unlink(write.temp).catch(() => undefined);
+  await cleanupCreatedDirectoryChain(write.createdDirectory);
+}
+
+async function cleanupCreatedDirectoryChain(chain: CreatedDirectoryChain | undefined): Promise<void> {
+  if (chain === undefined || !isSameOrChildPath(chain.target, chain.first)) {
+    return;
+  }
+
+  let current = chain.target;
+  while (true) {
+    try {
+      await rmdir(current);
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code !== "ENOENT") {
+        return;
+      }
+    }
+
+    if (resolve(current) === resolve(chain.first)) {
+      return;
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return;
+    }
+    current = parent;
+  }
+}
+
+function isSameOrChildPath(child: string, parent: string): boolean {
+  const childFromParent = relative(resolve(parent), resolve(child));
+  return (
+    childFromParent === "" ||
+    (childFromParent !== ".." && !childFromParent.startsWith(`..${sep}`) && !isAbsolute(childFromParent))
+  );
 }
 
 function assertExpectedRegularFile(

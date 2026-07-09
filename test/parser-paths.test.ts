@@ -49,7 +49,7 @@ describe("format hardening", () => {
     );
   }
 
-  test("overlap detection is not bypassed by a dot path", async () => {
+  test("dot paths are rejected before matching", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-dot-path-"));
     await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\n");
     await writeFile(
@@ -64,7 +64,9 @@ describe("format hardening", () => {
     );
 
     const before = await readFile(join(cwd, "file.txt"));
-    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("overlaps the source block");
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain . or .. path segments"
+    );
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
   });
 
@@ -256,7 +258,7 @@ describe("format hardening", () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-control-path-"));
     const payload = "inserted bytes\n";
     const sha = createHash("sha256").update(payload).digest("hex");
-    const dst = "bad\tpath.txt";
+    const dst = "bad\u001b[31mpath.txt";
     await writeFile(
       join(cwd, "patch.blockpatch"),
       [
@@ -273,6 +275,30 @@ describe("format hardening", () => {
 
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
       "contains unsupported control characters"
+    );
+  });
+
+  test("patch operation paths may not contain dot segments", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-dot-segment-path-"));
+    const payload = "inserted bytes\n";
+    const sha = createHash("sha256").update(payload).digest("hex");
+    const dst = "nested/../new.txt";
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      [
+        `diff --blockpatch /dev/null b/${dst}`,
+        "blockpatch version 1",
+        `blockpatch move id=move-1 payload-sha256=${sha}`,
+        "--- /dev/null",
+        `+++ b/${dst}`,
+        "",
+        "@@ -0,0 +1,1 @@ blockpatch-target id=move-1",
+        "+inserted bytes"
+      ].join("\n") + "\n"
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain . or .. path segments"
     );
   });
 

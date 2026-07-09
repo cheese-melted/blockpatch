@@ -85,7 +85,7 @@ Format constraints:
 
 - Every file section must declare `blockpatch version 1` on the line after `diff --blockpatch`.
 - The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. The prefixes are consumed by the default `-p1` path stripping ([Commands](commands.md#paths-and-stripping)).
-- Patch-declared paths use POSIX-style `/` separators on every platform. Backslashes are rejected instead of normalized.
+- Patch-declared paths use POSIX-style `/` separators on every platform. Backslashes, `.`/`..` path segments, and non-printing control characters are rejected instead of normalized or escaped.
 - `blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
 - Source context before and after may each be empty.
 - Target hunks for existing files must include context on at least one side; either side may be empty, but not both.
@@ -307,11 +307,17 @@ type BlockPatchJsonError = {
     matches_truncated?: boolean
     ranges?: Array<{ start: number; end: number }>
     line_ranges?: Array<{ start: number; end: number }>
+    source_range?: { start: number; end: number }
+    target_range?: { start: number; end: number }
+    payload_sha256?: string
+    suggested_action?: string
   }
 }
 ```
 
 Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. When `matches_truncated` is true, `matches` is a lower bound rather than an exact count. They do not include source snippets, fuzzy suggestions, or repair guidance.
+
+`partial_applied_duplicate` reports an interrupted cross-file apply state where the source payload is still present and the destination already contains the exact final target state. It includes `source_range`, `target_range`, `payload_sha256`, and `suggested_action: "review_then_remove_source"`. `blockpatch` does not auto-repair this state.
 
 Error codes are the agent-facing branch contract: branch on `error.code`, not on human-readable messages. Removing a code or changing its meaning is semver-major.
 
@@ -331,6 +337,7 @@ type BlockPatchErrorCode =
   | "target_ambiguous"
   | "destination_exists"
   | "concurrent_modification"
+  | "partial_applied_duplicate"
   | "payload_mismatch"
   | "hash_mismatch"
   | "invalid_utf8"

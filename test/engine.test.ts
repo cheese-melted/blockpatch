@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -26,6 +26,7 @@ import {
   publicExampleWork,
   shaText,
   systemPatchAvailable,
+  symlinkOrSkip,
   driftConformanceLineNumbers,
   corruptConformanceSourceCount
 } from "./helpers";
@@ -647,6 +648,37 @@ describe("patch --fuzz=0 conformance", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(conformanceAfter);
   });
 
+  test("partially applied cross-file patch reports duplicate recovery state", async () => {
+    const patchText = await generateCrossFileConformancePatch();
+    const cwd = await crossFileConformanceFixture();
+    const sourceBefore = await readFile(join(cwd, "source.ts"));
+    const payload = "function movedThing() {\n  return 42;\n}\n";
+    await writeFile(join(cwd, "target.ts"), crossFileTargetAfter);
+    await writeFile(join(cwd, "generated.blockpatch"), patchText);
+
+    let error: unknown;
+    try {
+      await applyPatchFile("generated.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("partially applied");
+    expect((error as BlockPatchError).code).toBe("partial_applied_duplicate");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "target.ts",
+      phase: "target",
+      anchor: "blockpatch-target",
+      source_range: { start: "before\n".length, end: "before\n".length + payload.length },
+      target_range: { start: 0, end: crossFileTargetAfter.length },
+      payload_sha256: shaText(payload),
+      suggested_action: "review_then_remove_source"
+    });
+    expect(await readFile(join(cwd, "source.ts"))).toEqual(sourceBefore);
+    expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe(crossFileTargetAfter);
+  });
+
   test.skipIf(!systemPatchAvailable)(
     "generated same-file patch applies with system patch --fuzz=0",
     async () => {
@@ -914,6 +946,31 @@ describe("atomic write concurrency guards", () => {
     });
 
     expect(await readFile(path, "utf8")).toBe("planned\n");
+  });
+
+  test("rejects a symlink output parent before staging a create", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "blockpatch-create-symlink-parent-"));
+    const cwd = join(parent, "cwd");
+    const outside = join(parent, "outside");
+    await mkdir(cwd);
+    await mkdir(outside);
+    if (!(await symlinkOrSkip(outside, join(cwd, "link")))) {
+      return;
+    }
+
+    let error: unknown;
+    try {
+      await writeAtomic(join(cwd, "link", "file.txt"), Buffer.from("planned\n"), {
+        create: true,
+        expected: { kind: "missing", label: "link/file.txt", bytesIfExists: Buffer.from("planned\n") }
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("symlink_path");
+    expect(await pathExists(join(outside, "file.txt"))).toBe(false);
   });
 });
 

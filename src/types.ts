@@ -89,5 +89,9 @@ export interface BlockPatchJsonError {
     matches_truncated?: boolean;
     ranges?: ByteRangeResult[];
     line_ranges?: ByteRangeResult[];
+    source_range?: ByteRangeResult;
+    target_range?: ByteRangeResult;
+    payload_sha256?: string;
+    suggested_action?: string;
   };
 }

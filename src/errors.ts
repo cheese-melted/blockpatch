@@ -20,6 +20,7 @@ export type BlockPatchErrorCode =
   | "target_ambiguous"
   | "destination_exists"
   | "concurrent_modification"
+  | "partial_applied_duplicate"
   | "payload_mismatch"
   | "hash_mismatch"
   | "invalid_utf8"
@@ -43,6 +44,10 @@ export interface BlockPatchErrorDetails {
   matches_truncated?: boolean;
   ranges?: BlockPatchErrorRange[];
   line_ranges?: BlockPatchErrorRange[];
+  source_range?: BlockPatchErrorRange;
+  target_range?: BlockPatchErrorRange;
+  payload_sha256?: string;
+  suggested_action?: string;
 }
 
 const maxErrorRanges = 10;

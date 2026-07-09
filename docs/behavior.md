@@ -25,8 +25,9 @@ Patch-declared source and destination paths, and move JSON `src`/`dst` paths, mu
 Rejected operation paths include:
 
 - absolute paths
-- `..` escapes
+- `.` or `..` path segments
 - backslashes; operation paths use POSIX-style `/` separators in `.blockpatch` artifacts and move JSON
+- non-printing control characters
 - paths containing symlink components
 - existing regular files whose real path escapes `--cwd`
 
@@ -166,6 +167,8 @@ Before renaming or removing a path, `blockpatch` re-checks that every existing f
 
 Once renames begin, a two-file operation is not transactional. The destination is renamed before the source, so an interruption can duplicate the payload, but should not delete it from both files. Atomic here means per-file replacement, not a crash-durable multi-file transaction.
 
+If a retry sees that a cross-file source payload is still present while the destination already contains the exact final target state, `blockpatch` fails with `partial_applied_duplicate` instead of guessing. The error includes the source range, target range, payload hash, and `suggested_action: "review_then_remove_source"`.
+
 ## Failure Rules
 
 `blockpatch` exits non-zero and does not modify files when:
@@ -180,6 +183,7 @@ Once renames begin, a two-file operation is not transactional. The destination i
 - a `file -> /dev/null` removal hunk does not match the whole file
 - source anchors are missing
 - source anchors or full source are ambiguous
+- a cross-file retry finds the source payload still present and the destination already patched
 - the located source payload does not exactly match the source hunk payload
 - target added payload does not exactly match source removed payload
 - `payload-sha256` does not match the moved payload

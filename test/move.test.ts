@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { applyPatchFile } from "../src/engine";
 import { moveBlock } from "../src/move";
 import { BlockPatchError } from "../src/errors";
+import type { MoveBlockArgs } from "../src/types";
 import {
   expectMissing,
   hardlinkOrSkip,
@@ -252,6 +253,21 @@ describe("moveBlock API", () => {
     ).rejects.toThrow("must be relative");
   });
 
+  test("rejects Windows absolute src paths as absolute paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-win-absolute-"));
+    await expect(
+      moveBlock(
+        {
+          src: "C:\\absolute\\source.ts",
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("must be relative");
+  });
+
   test("rejects NUL bytes in paths", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-nul-"));
     await expect(
@@ -264,7 +280,7 @@ describe("moveBlock API", () => {
         },
         { cwd }
       )
-    ).rejects.toThrow("Invalid source path");
+    ).rejects.toThrow("source path contains unsupported control characters");
   });
 
   test("rejects display control characters in paths", async () => {
@@ -272,7 +288,7 @@ describe("moveBlock API", () => {
     await expect(
       moveBlock(
         {
-          src: "source.ts\n.txt",
+          src: "source.ts\u001b.txt",
           src_start: "a",
           src_end: "b",
           target_before: "c"
@@ -292,6 +308,33 @@ describe("moveBlock API", () => {
         { cwd }
       )
     ).rejects.toThrow("destination path contains unsupported control characters");
+  });
+
+  test("rejects dot segments in paths", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-dot-segment-path-"));
+    await expect(
+      moveBlock(
+        {
+          src: "src/../source.ts",
+          src_start: "a",
+          src_end: "b",
+          target_before: "c"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("source path must not contain . or .. path segments");
+
+    await expect(
+      moveBlock(
+        {
+          src: "/dev/null",
+          dst: "nested/./target.ts",
+          payload: "inserted\n",
+          target_before: "anchor\n"
+        },
+        { cwd }
+      )
+    ).rejects.toThrow("destination path must not contain . or .. path segments");
   });
 
   test("rejects Windows-style separators in paths", async () => {
@@ -385,6 +428,36 @@ describe("moveBlock API", () => {
     expect(result.written).toBe(false);
     expect(await readFile(join(cwd, "source.ts"))).toEqual(Buffer.from("before\nx\r", "utf8"));
     expect(await readFile(join(cwd, "target.ts"), "utf8")).toBe("target\n");
+  });
+
+  test("generated move patches match direct moves and reverse byte-for-byte", async () => {
+    const rng = seededRandom(0x4d4f5645);
+
+    for (let index = 0; index < 24; index += 1) {
+      const scenario = randomMoveScenario(rng, index);
+      const planCwd = await mkdtemp(join(tmpdir(), "blockpatch-roundtrip-plan-"));
+      const patchCwd = await mkdtemp(join(tmpdir(), "blockpatch-roundtrip-patch-"));
+      const directCwd = await mkdtemp(join(tmpdir(), "blockpatch-roundtrip-direct-"));
+      await writeScenarioFiles(planCwd, scenario.files);
+      await writeScenarioFiles(patchCwd, scenario.files);
+      await writeScenarioFiles(directCwd, scenario.files);
+
+      const planned = await moveBlock(scenario.args, { cwd: planCwd, diff: true });
+      expect(planned.written).toBe(false);
+      expect(planned.patch).toStartWith("diff --blockpatch ");
+      await expectScenarioBytes(planCwd, scenario.files);
+
+      await writeFile(join(patchCwd, "generated.blockpatch"), planned.patch ?? "");
+      const applied = await applyPatchFile("generated.blockpatch", { cwd: patchCwd });
+      const direct = await moveBlock(scenario.args, { cwd: directCwd });
+      expect(applied.status).toBe(direct.status);
+      expect(applied.changed).toEqual(direct.changed);
+      await expectSameScenarioBytes(patchCwd, directCwd, scenario.paths);
+
+      const reversed = await applyPatchFile("generated.blockpatch", { cwd: patchCwd, reverse: true });
+      expect(reversed.status).toBe("applied");
+      await expectScenarioBytes(patchCwd, scenario.files);
+    }
   });
 
   test("create_file mode renders a whole-file /dev/null creation patch", async () => {
@@ -530,3 +603,102 @@ describe("moveBlock API", () => {
     expect((error as BlockPatchError).code).toBe("invalid_utf8");
   });
 });
+
+interface RandomMoveScenario {
+  args: MoveBlockArgs;
+  files: Record<string, string>;
+  paths: string[];
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x100000000;
+  };
+}
+
+function randomMoveScenario(rng: () => number, index: number): RandomMoveScenario {
+  const sameFile = index % 2 === 0;
+  const sourceFirst = randomInt(rng, 2) === 0;
+  const anchorMode = index % 3;
+  const srcStart = `<<bp-src-start-${index}>>\n`;
+  const srcEnd = `<<bp-src-end-${index}>>\n`;
+  const targetBefore = `<<bp-target-before-${index}>>\n`;
+  const targetAfter = `<<bp-target-after-${index}>>\n`;
+  const sourceBlock = srcStart + randomLines(rng, `payload-${index}`, 5) + srcEnd;
+  const targetBlock = targetBefore + targetAfter;
+  const args: MoveBlockArgs = {
+    src: sameFile ? "file.txt" : "source.txt",
+    dst: sameFile ? "file.txt" : "target.txt",
+    src_start: srcStart,
+    src_end: srcEnd
+  };
+
+  if (anchorMode !== 1) {
+    args.target_before = targetBefore;
+  }
+  if (anchorMode !== 0) {
+    args.target_after = targetAfter;
+  }
+
+  if (sameFile) {
+    const beforeSource = randomLines(rng, `same-prefix-${index}`, 4);
+    const between = randomLines(rng, `same-between-${index}`, 3);
+    const afterTarget = randomLines(rng, `same-suffix-${index}`, 4);
+    const file = sourceFirst
+      ? beforeSource + sourceBlock + between + targetBlock + afterTarget
+      : beforeSource + targetBlock + between + sourceBlock + afterTarget;
+    return { args, files: { "file.txt": file }, paths: ["file.txt"] };
+  }
+
+  return {
+    args,
+    files: {
+      "source.txt": randomLines(rng, `src-prefix-${index}`, 4) + sourceBlock + randomLines(rng, `src-suffix-${index}`, 4),
+      "target.txt": randomLines(rng, `dst-prefix-${index}`, 4) + targetBlock + randomLines(rng, `dst-suffix-${index}`, 4)
+    },
+    paths: ["source.txt", "target.txt"]
+  };
+}
+
+function randomLines(rng: () => number, prefix: string, maxLines: number): string {
+  const lineCount = randomInt(rng, maxLines + 1);
+  let text = "";
+  for (let index = 0; index < lineCount; index += 1) {
+    text += `${prefix}-${index}-${randomToken(rng)}\n`;
+  }
+  return text;
+}
+
+function randomToken(rng: () => number): string {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789_- ";
+  const length = 1 + randomInt(rng, 16);
+  let token = "";
+  for (let index = 0; index < length; index += 1) {
+    token += alphabet[randomInt(rng, alphabet.length)];
+  }
+  return token.trimEnd();
+}
+
+function randomInt(rng: () => number, exclusiveMax: number): number {
+  return Math.floor(rng() * exclusiveMax);
+}
+
+async function writeScenarioFiles(cwd: string, files: Record<string, string>): Promise<void> {
+  for (const [path, text] of Object.entries(files)) {
+    await writeFile(join(cwd, path), text);
+  }
+}
+
+async function expectScenarioBytes(cwd: string, files: Record<string, string>): Promise<void> {
+  for (const [path, text] of Object.entries(files)) {
+    expect(await readFile(join(cwd, path))).toEqual(Buffer.from(text, "utf8"));
+  }
+}
+
+async function expectSameScenarioBytes(leftCwd: string, rightCwd: string, paths: string[]): Promise<void> {
+  for (const path of paths) {
+    expect(await readFile(join(leftCwd, path))).toEqual(await readFile(join(rightCwd, path)));
+  }
+}
