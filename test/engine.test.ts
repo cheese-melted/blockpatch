@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -948,6 +948,44 @@ describe("atomic write concurrency guards", () => {
     });
 
     expect(await readFile(path, "utf8")).toBe("planned\n");
+  });
+
+  test.skipIf(process.platform === "win32")("preserves existing file mode for replacements", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-preserve-mode-"));
+    const path = join(cwd, "file.sh");
+    await writeFile(path, "original\n");
+    await chmod(path, 0o755);
+    const snapshot = await readFileSnapshot(path, "file");
+
+    await writeAtomic(path, Buffer.from("planned\n"), {
+      expected: { kind: "file", label: "file.sh", snapshot }
+    });
+
+    expect(await readFile(path, "utf8")).toBe("planned\n");
+    expect((await lstat(path)).mode & 0o777).toBe(0o755);
+  });
+
+  test.skipIf(process.platform === "win32")("rejects mode changes after snapshot", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-mode-concurrent-"));
+    const path = join(cwd, "file.sh");
+    await writeFile(path, "original\n");
+    await chmod(path, 0o755);
+    const snapshot = await readFileSnapshot(path, "file");
+    await chmod(path, 0o644);
+
+    let error: unknown;
+    try {
+      await writeAtomic(path, Buffer.from("planned\n"), {
+        expected: { kind: "file", label: "file.sh", snapshot }
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("concurrent_modification");
+    expect(await readFile(path, "utf8")).toBe("original\n");
+    expect((await lstat(path)).mode & 0o777).toBe(0o644);
   });
 
   test("rejects a symlink output parent before staging a create", async () => {

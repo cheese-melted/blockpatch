@@ -132,6 +132,7 @@ Rules for `/dev/null -> file` creation:
 - the target hunk must be whole-file payload: only contiguous `+` payload lines, with no context lines.
 - zero-byte payload is valid and creates an empty file.
 - a missing destination is created, including parent directories; new files are created with mode 0644.
+- replacements preserve the existing file's permission bits; if the existing file mode changes after verification, the write fails as `concurrent_modification`.
 - if the destination already exists with exactly the requested bytes, the result is `already_applied`; if it exists with different bytes, the patch fails.
 
 Rules for `file -> /dev/null` removal:

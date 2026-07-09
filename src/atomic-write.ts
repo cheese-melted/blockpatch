@@ -160,6 +160,7 @@ function sameStatSnapshot(left: FileStatSnapshot, right: FileStatSnapshot): bool
   return (
     left.dev === right.dev &&
     left.ino === right.ino &&
+    left.mode === right.mode &&
     left.size === right.size &&
     left.mtimeMs === right.mtimeMs &&
     left.ctimeMs === right.ctimeMs
@@ -182,7 +183,8 @@ async function stageAtomicWrite(write: AtomicWriteRequest): Promise<StagedAtomic
     createdDirectory = await ensureParentDirectory(directory);
     await assertSafeOutputParentDirectory(directory, write.path);
     const temp = join(directory, `.${name}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-    await writeFile(temp, write.bytes, { flag: "wx", mode: 0o644 });
+    const mode = writeMode(write);
+    await writeFile(temp, write.bytes, { flag: "wx", mode });
 
     const stat = await lstat(temp);
     if (!stat.isFile() || stat.isSymbolicLink()) {
@@ -193,8 +195,9 @@ async function stageAtomicWrite(write: AtomicWriteRequest): Promise<StagedAtomic
       });
     }
 
-    // Explicit mode avoids process umask differences for newly-created files.
-    await chmod(temp, 0o644);
+    // Explicit mode avoids process umask differences for creations and
+    // preserves existing permission bits for replacements.
+    await chmod(temp, mode);
     return {
       path: write.path,
       temp,
@@ -208,6 +211,13 @@ async function stageAtomicWrite(write: AtomicWriteRequest): Promise<StagedAtomic
     }
     failFileSystem(error, write.label ?? write.path, "Could not stage file write", "write");
   }
+}
+
+function writeMode(write: AtomicWriteRequest): number {
+  if (write.expected?.kind === "file") {
+    return write.expected.snapshot.stat.mode & 0o7777;
+  }
+  return 0o644;
 }
 
 async function ensureParentDirectory(directory: string): Promise<CreatedDirectoryChain | undefined> {
