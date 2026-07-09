@@ -1,7 +1,7 @@
 # blockpatch
 
 [![CI](https://github.com/cheese-melted/blockpatch/actions/workflows/ci.yml/badge.svg)](https://github.com/cheese-melted/blockpatch/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/blockpatch.svg)](https://www.npmjs.com/package/blockpatch)
+[![npm version](https://img.shields.io/npm/v/blockpatch.svg?cacheSeconds=300)](https://www.npmjs.com/package/blockpatch)
 
 Cut/paste for agents: hash-verified block moves that read like unified diffs.
 
