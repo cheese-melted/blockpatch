@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { applyPatchFile, checkPatchBytesInMemory, checkPatchFile, indexesOfLimited, writeAtomic } from "../src/engine";
+import { applyPatchFile, indexesOfLimited, validatePatchBytesInMemory, writeAtomic } from "../src/engine";
 import { BlockPatchError } from "../src/errors";
 import { readFileSnapshot } from "../src/files";
 import {
@@ -135,10 +135,10 @@ describe("blockpatch golden fixtures", () => {
     expect(after).toEqual(before);
   });
 
-  test("check validates without modifying file", async () => {
+  test("dry-run validates without modifying file", async () => {
     const cwd = await fixtureCase("success");
     const before = await readFile(join(cwd, "file.txt"));
-    const result = await checkPatchFile("patch.blockpatch", { cwd });
+    const result = await applyPatchFile("patch.blockpatch", { cwd, dryRun: true });
     const after = await readFile(join(cwd, "file.txt"));
     expect(result.changed).toEqual(["file.txt"]);
     expect(result.affected).toEqual(["file.txt"]);
@@ -156,7 +156,7 @@ describe("blockpatch golden fixtures", () => {
     expect(after).toEqual(before);
   });
 
-  test("in-memory check validates supplied file bytes", () => {
+  test("in-memory validation accepts supplied file bytes", () => {
     const payload = "move me\n";
     const file = Buffer.from("alpha\nmove me\nomega\ntarget\n");
     const patch = Buffer.from(
@@ -175,7 +175,7 @@ describe("blockpatch golden fixtures", () => {
         "+move me\n"
     );
 
-    const result = checkPatchBytesInMemory(patch, [{ path: "memory.txt", bytes: file }]);
+    const result = validatePatchBytesInMemory(patch, [{ path: "memory.txt", bytes: file }]);
     expect(result.changed).toEqual(["memory.txt"]);
     expect(result.written).toBe(false);
     expect(result.status).toBe("applied");
@@ -199,12 +199,12 @@ describe("blockpatch golden fixtures", () => {
     });
   });
 
-  test("reverse check validates without modifying an applied file", async () => {
+  test("reverse dry-run validates without modifying an applied file", async () => {
     const cwd = await fixtureCase("success");
     await applyPatchFile("patch.blockpatch", { cwd });
     const applied = await readFile(join(cwd, "file.txt"));
 
-    const result = await checkPatchFile("patch.blockpatch", { cwd, reverse: true });
+    const result = await applyPatchFile("patch.blockpatch", { cwd, reverse: true, dryRun: true });
     expect(await readFile(join(cwd, "file.txt"))).toEqual(applied);
     expect(result.changed).toEqual(["file.txt"]);
     expect(result.written).toBe(false);
@@ -250,10 +250,10 @@ describe("public examples", () => {
       const patchPath = join(exampleRoot, example.name, "patch.blockpatch");
       const options = { cwd, reverse: example.reverse ?? false };
 
-      const check = await checkPatchFile(patchPath, options);
-      expect([...check.changed].sort()).toEqual([...example.changed].sort());
-      expect(check.status).toBe("applied");
-      expect(check.written).toBe(false);
+      const dryRun = await applyPatchFile(patchPath, { ...options, dryRun: true });
+      expect([...dryRun.changed].sort()).toEqual([...example.changed].sort());
+      expect(dryRun.status).toBe("applied");
+      expect(dryRun.written).toBe(false);
 
       const result = await applyPatchFile(patchPath, options);
       expect([...result.changed].sort()).toEqual([...example.changed].sort());
@@ -272,18 +272,20 @@ describe("public examples", () => {
     });
   }
 
-  test("same-file relocation check command matches the documented example shape", async () => {
+  test("same-file relocation dry-run command matches the documented example shape", async () => {
     const cwd = await publicExampleWork("same-file-relocation");
     const patchPath = join(exampleRoot, "same-file-relocation", "patch.blockpatch");
     const before = await readFile(join(cwd, "file.txt"));
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", patchPath, "-d", cwd],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", patchPath, "-d", cwd, "--dry-run"],
       stdout: "pipe",
       stderr: "pipe"
     });
 
     expect(await proc.exited).toBe(0);
-    expect(await new Response(proc.stdout).text()).toBe("would change file.txt\n");
+    expect(await new Response(proc.stdout).text()).toBe(
+      "dry-run clean: move-1 file.txt:2 -> file.txt:5, 1 line\n"
+    );
     expect(await new Response(proc.stderr).text()).toBe("");
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
   });
@@ -293,7 +295,7 @@ describe("public examples", () => {
     const patchPath = join(exampleRoot, "failure-ambiguous-target", "patch.blockpatch");
     const before = await readFile(join(cwd, "file.txt"));
 
-    await expect(checkPatchFile(patchPath, { cwd })).rejects.toThrow("Target anchor is ambiguous");
+    await expect(applyPatchFile(patchPath, { cwd, dryRun: true })).rejects.toThrow("Target anchor is ambiguous");
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
   });
 });
@@ -1328,7 +1330,9 @@ describe("one-sided hunks and null endpoints", () => {
 
     expect(await proc.exited).toBe(0);
     expect(await new Response(proc.stderr).text()).toBe("");
-    expect(await new Response(proc.stdout).text()).toBe("changed file.txt\n");
+    expect(await new Response(proc.stdout).text()).toBe(
+      "applied: move-1 /dev/null -> file.txt:1, 1 line\nchanged: file.txt\n"
+    );
     expect((await lstat(join(cwd, "file.txt"))).mode & 0o777).toBe(0o644);
   });
 

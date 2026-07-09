@@ -44,6 +44,16 @@ export interface BlockPatchErrorDetails {
   matches_truncated?: boolean;
   ranges?: BlockPatchErrorRange[];
   line_ranges?: BlockPatchErrorRange[];
+  src_start_matches?: number;
+  src_start_matches_truncated?: boolean;
+  src_start_ranges?: BlockPatchErrorRange[];
+  src_start_line_ranges?: BlockPatchErrorRange[];
+  src_end_matches?: number;
+  src_end_matches_truncated?: boolean;
+  src_end_ranges?: BlockPatchErrorRange[];
+  src_end_line_ranges?: BlockPatchErrorRange[];
+  src_end_matches_after_start?: number;
+  src_end_matches_after_start_truncated?: boolean;
   source_range?: BlockPatchErrorRange;
   target_range?: BlockPatchErrorRange;
   payload_sha256?: string;

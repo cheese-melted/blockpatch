@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { applyPatchFile, checkPatchBytes } from "../src/engine";
+import { applyPatchBytes, applyPatchFile } from "../src/engine";
 import { moveBlock } from "../src/move";
 import {
   fixtureCase,
@@ -14,7 +14,7 @@ import {
 } from "./helpers";
 
 describe("CLI", () => {
-  test("help explains move JSON anchors and newline behavior", async () => {
+  test("help gives a compact walkthrough", async () => {
     const proc = Bun.spawn({
       cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "--help"],
       stdout: "pipe",
@@ -24,21 +24,144 @@ describe("CLI", () => {
     expect(await proc.exited).toBe(0);
     expect(await new Response(proc.stderr).text()).toBe("");
     const stdout = await new Response(proc.stdout).text();
-    expect(stdout).toContain("Move JSON fields:");
-    expect(stdout).toContain("target_before is the exact context immediately before the insertion point");
-    expect(stdout).toContain("blockpatch never adds separators");
+    expect(stdout).toContain("Walkthrough:");
+    expect(stdout).toContain("# before: src/foo.ts");
+    expect(stdout).toContain("export function movedThing() {");
+    expect(stdout).toContain("# before: src/bar.ts");
+    expect(stdout).toContain("$ blockpatch move --json - --diff --output patch.blockpatch --dry-run <<'JSON'");
+    expect(stdout).toContain("\"src\": \"src/foo.ts\"");
+    expect(stdout).toContain("JSON\n$ blockpatch apply patch.blockpatch");
+    expect(stdout).toContain("# after: src/foo.ts");
+    expect(stdout).toContain("# after: src/bar.ts");
+    expect(stdout).not.toContain("Use this for that:");
+    expect(stdout).not.toContain("More:");
+    expect(stdout).not.toContain("Move JSON fields:");
+    expect(stdout).not.toContain("target_before is the exact context immediately before the insertion point");
+    expect(stdout).not.toContain("blockpatch never adds separators");
   });
 
-  test("supports required check/apply commands", async () => {
-    const cwd = await fixtureCase("success");
-    const patchPath = join(cwd, "patch.blockpatch");
-    const check = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", patchPath, "--cwd", cwd],
+  test("move help explains anchors and newline behavior", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "help", "move"],
       stdout: "pipe",
       stderr: "pipe"
     });
-    expect(await check.exited).toBe(0);
-    expect(await new Response(check.stderr).text()).toBe("");
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("blockpatch move");
+    expect(stdout).toContain("--insert-before <text>");
+    expect(stdout).toContain("insert_after inserts after the exact anchor");
+    expect(stdout).toContain("target_before is the context before the insertion point");
+    expect(stdout).toContain("blockpatch never adds separators");
+  });
+
+  test("move help explains review flow", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--help"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("blockpatch move");
+    expect(stdout).toContain("Recommended review flow:");
+    expect(stdout).toContain("blockpatch move --json - --diff --output patch.blockpatch");
+  });
+
+  test("plan help explains JSON envelope", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "help", "plan"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    const stdout = await new Response(proc.stdout).text();
+    expect(stdout).toContain("blockpatch plan");
+    expect(stdout).toContain("JSON envelope");
+    expect(stdout).toContain("jq -r .patch plan.json > patch.blockpatch");
+  });
+
+  test("help lists parser-backed flags", async () => {
+    const cases = [
+      ["apply", ["--patch", "--cwd", "--strip", "--dry-run", "--reverse", "--json-output", "--explain"]],
+      [
+        "move",
+        [
+          "--json",
+          "--cwd",
+          "--dry-run",
+          "--diff",
+          "--output",
+          "--src-start",
+          "--insert-before",
+          "--target-after",
+          "--expected-payload-sha256"
+        ]
+      ],
+      ["plan", ["--json", "--cwd", "--json-output", "--explain"]],
+      ["version", ["--json-output"]]
+    ] as const;
+
+    for (const [command, flags] of cases) {
+      const proc = Bun.spawn({
+        cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "help", command],
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+
+      expect(await proc.exited).toBe(0);
+      expect(await new Response(proc.stderr).text()).toBe("");
+      const stdout = await new Response(proc.stdout).text();
+      for (const flag of flags) {
+        expect(stdout).toContain(flag);
+      }
+    }
+  });
+
+  test("all commands accept --help", async () => {
+    const commands = ["apply", "move", "plan", "version"];
+
+    for (const command of commands) {
+      const proc = Bun.spawn({
+        cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), command, "--help"],
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+
+      expect(await proc.exited).toBe(0);
+      expect(await new Response(proc.stderr).text()).toBe("");
+      expect(await new Response(proc.stdout).text()).toContain(`blockpatch ${command}`);
+    }
+  });
+
+  test("rejects removed check command", async () => {
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "--help"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    expect(await new Response(proc.stderr).text()).toContain("Unknown command: check");
+  });
+
+  test("supports required dry-run/apply workflow", async () => {
+    const cwd = await fixtureCase("success");
+    const patchPath = join(cwd, "patch.blockpatch");
+    const dryRun = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", patchPath, "--cwd", cwd, "--dry-run"],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    expect(await dryRun.exited).toBe(0);
+    expect(await new Response(dryRun.stderr).text()).toBe("");
 
     const apply = Bun.spawn({
       cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", patchPath, "--cwd", cwd],
@@ -75,20 +198,20 @@ describe("CLI", () => {
     expect(after).toEqual(before);
   });
 
-  test("supports apply --reverse and check -R", async () => {
+  test("supports apply --reverse and reverse dry-run", async () => {
     const cwd = await fixtureCase("success");
     const patchPath = join(cwd, "patch.blockpatch");
     const before = await readFile(join(cwd, "file.txt"));
     await applyPatchFile("patch.blockpatch", { cwd });
     const applied = await readFile(join(cwd, "file.txt"));
 
-    const check = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "-R", patchPath, "--cwd", cwd],
+    const dryRun = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-R", patchPath, "--cwd", cwd, "--dry-run"],
       stdout: "pipe",
       stderr: "pipe"
     });
-    expect(await check.exited).toBe(0);
-    expect(await new Response(check.stderr).text()).toBe("");
+    expect(await dryRun.exited).toBe(0);
+    expect(await new Response(dryRun.stderr).text()).toBe("");
     expect(await readFile(join(cwd, "file.txt"))).toEqual(applied);
 
     const reverse = Bun.spawn({
@@ -126,8 +249,18 @@ describe("CLI", () => {
       affected: string[];
       written: boolean;
       status: string;
+      mode: string;
+      validation: string;
+      patch_sha256: string;
       strip_components: number;
-      moves: Array<{ payload_sha256: string; source_range: { start: number; end: number } }>;
+      moves: Array<{
+        payload_sha256: string;
+        payload_lines: number;
+        payload_hash_verified: boolean;
+        source_range: { start: number; end: number };
+        source_line_range: { start: number; end: number };
+        insert_line: number;
+      }>;
     };
     expect(stdout).toMatchObject({
       ok: true,
@@ -135,11 +268,18 @@ describe("CLI", () => {
       affected: ["file.txt"],
       written: false,
       status: "applied",
+      mode: "dry_run",
+      validation: "clean",
       strip_components: 1
     });
+    expect(stdout.patch_sha256).toHaveLength(64);
     expect(stdout.moves[0]).toMatchObject({
       payload_sha256: "f721166071c491fd38ac82a8432ecc349f39f537a969054ab2c8d3175c731e7e",
-      source_range: { start: "alpha\n".length, end: "alpha\nmove me\n".length }
+      payload_lines: 1,
+      payload_hash_verified: true,
+      source_range: { start: "alpha\n".length, end: "alpha\nmove me\n".length },
+      source_line_range: { start: 2, end: 2 },
+      insert_line: 5
     });
     expect(await readFile(join(cwd, "file.txt"))).toEqual(before);
   });
@@ -182,10 +322,30 @@ describe("CLI", () => {
     expect(actual).toEqual(expected);
   });
 
-  test("supports -i, -d, and -p aliases", async () => {
+  test("apply reads stdin with --patch -", async () => {
+    const cwd = await fixtureCase("success");
+    const patch = await readFile(join(cwd, "patch.blockpatch"));
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "--patch", "-", "--cwd", cwd, "--dry-run"],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(patch);
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await new Response(proc.stdout).text()).toContain("dry-run clean: move-1 file.txt:2 -> file.txt:5, 1 line");
+    const actual = await readFile(join(cwd, "file.txt"));
+    const before = await readFile(join(fixtureRoot, "success", "before.txt"));
+    expect(actual).toEqual(before);
+  });
+
+  test("supports --patch, -d, and -p options", async () => {
     const cwd = await fixtureCase("success");
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-i", join(cwd, "patch.blockpatch"), "-d", cwd, "-p1"],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "--patch", join(cwd, "patch.blockpatch"), "-d", cwd, "-p1"],
       stdout: "pipe",
       stderr: "pipe"
     });
@@ -222,7 +382,7 @@ describe("CLI", () => {
       .replaceAll("a/file.txt", "a/nested/file.txt")
       .replaceAll("b/file.txt", "b/nested/file.txt");
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "-d", cwd, "-p2"],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-d", cwd, "-p2", "--dry-run"],
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe"
@@ -233,7 +393,7 @@ describe("CLI", () => {
     expect(await proc.exited).toBe(0);
     expect(await new Response(proc.stderr).text()).toBe("");
     const stdout = await new Response(proc.stdout).text();
-    expect(stdout).toContain("would change file.txt");
+    expect(stdout).toContain("dry-run clean: move-1 file.txt:2 -> file.txt:5, 1 line");
   });
 
   test("patch command JSON reports effective strip count", async () => {
@@ -242,7 +402,7 @@ describe("CLI", () => {
       .replaceAll("a/file.txt", "a/nested/file.txt")
       .replaceAll("b/file.txt", "b/nested/file.txt");
     const proc = Bun.spawn({
-      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "check", "-d", cwd, "-p2", "--json-output"],
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "apply", "-d", cwd, "-p2", "--dry-run", "--json-output"],
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe"
@@ -668,10 +828,156 @@ describe("CLI", () => {
     expect(stdout.patch).toContain("blockpatch move id=move-1 payload-sha256=");
     expect(stdout.patch).toContain("@@ -1,5 +1,2 @@ blockpatch-source id=move-1");
     expect(stdout.patch).toContain("@@ -6,2 +3,5 @@ blockpatch-target id=move-1");
-    const selfCheck = await checkPatchBytes(Buffer.from(stdout.patch, "utf8"), { cwd });
-    expect(selfCheck.status).toBe("applied");
-    expect(selfCheck.written).toBe(false);
+    const dryRun = await applyPatchBytes(Buffer.from(stdout.patch, "utf8"), { cwd, dryRun: true });
+    expect(dryRun.status).toBe("applied");
+    expect(dryRun.written).toBe(false);
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+  });
+
+  test("move --diff --output writes a patch file atomically without stdout", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const outputPath = join(cwd, "patch.blockpatch");
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--json",
+        "-",
+        "--diff",
+        "--output",
+        outputPath,
+        "--cwd",
+        cwd
+      ],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        insert_after: "class Target {\n",
+        insert_before: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+    const patch = await readFile(outputPath, "utf8");
+    expect(patch).toContain("diff --blockpatch a/source.ts b/source.ts");
+    await applyPatchFile(outputPath, { cwd });
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
+  });
+
+  test("move --diff --output --dry-run writes patch and prints validation summary", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const outputPath = join(cwd, "patch.blockpatch");
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--json",
+        "-",
+        "--diff",
+        "--output",
+        outputPath,
+        "--dry-run",
+        "--cwd",
+        cwd
+      ],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        insert_after: "class Target {\n",
+        insert_before: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stdout).text()).toBe("dry-run clean: move-1 source.ts:2-4 -> source.ts:7, 3 lines\n");
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+    const patch = await readFile(outputPath, "utf8");
+    expect(patch).toContain("diff --blockpatch a/source.ts b/source.ts");
+    expect(patch).toContain("blockpatch move id=move-1 payload-sha256=");
+  });
+
+  test("move --diff --output leaves existing output untouched on failure", async () => {
+    const cwd = await moveFixture();
+    const outputPath = join(cwd, "patch.blockpatch");
+    await writeFile(outputPath, "keep me\n");
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--json",
+        "-",
+        "--diff",
+        "--output",
+        outputPath,
+        "--cwd",
+        cwd
+      ],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "missing end\n",
+        insert_after: "class Target {\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    expect(await new Response(proc.stderr).text()).toContain("Source delimiters were not found");
+    expect(await readFile(outputPath, "utf8")).toBe("keep me\n");
+  });
+
+  test("move --output requires move --diff", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--output", join(cwd, "patch.blockpatch"), "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        insert_after: "class Target {\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    expect(await new Response(proc.stderr).text()).toContain("--output is only valid with move --diff");
   });
 
   test("plan --json returns a reviewable patch without writing", async () => {
@@ -1141,6 +1447,37 @@ describe("CLI", () => {
     );
   });
 
+  test("move flag mode supports insert-before and insert-after", async () => {
+    const cwd = await moveFixture();
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--src",
+        "source.ts",
+        "--src-start",
+        "function movedThing() {\n",
+        "--src-end",
+        "}\n",
+        "--insert-after",
+        "class Target {\n",
+        "--insert-before",
+        "}\n",
+        "--cwd",
+        cwd
+      ],
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
+  });
+
   test("move flag mode treats --json-output as a payload value", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-json-output-payload-"));
     await writeFile(join(cwd, "file.txt"), "alpha\n");
@@ -1167,7 +1504,9 @@ describe("CLI", () => {
 
     expect(await proc.exited).toBe(0);
     expect(await new Response(proc.stderr).text()).toBe("");
-    expect(await new Response(proc.stdout).text()).toBe("changed file.txt\n");
+    expect(await new Response(proc.stdout).text()).toBe(
+      "applied: move-1 /dev/null -> file.txt:2, 1 line\nchanged: file.txt\n"
+    );
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\n--json-output");
   });
 
@@ -1196,7 +1535,7 @@ describe("CLI", () => {
     expect(await proc.exited).toBe(1);
     expect(await new Response(proc.stdout).text()).toBe("");
     const stderr = await new Response(proc.stderr).text();
-    expect(stderr).toContain("blockpatch: move requires target_before or target_after");
+    expect(stderr).toContain("blockpatch: move requires target_before, target_after, insert_before, or insert_after");
     expect(stderr.trim().startsWith("{")).toBe(false);
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\n");
   });
@@ -1544,6 +1883,49 @@ describe("CLI", () => {
       code: "invalid_move_args",
       field: "src_start"
     });
+  });
+
+  test("move --json-output includes source delimiter diagnostics", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-source-diagnostics-json-"));
+    await writeFile(join(cwd, "source.ts"), "alpha\nfunction movedThing() {\n  return 42;\n}\nclass Target {\n}\n");
+    const proc = Bun.spawn({
+      cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "move", "--json", "-", "--json-output", "--cwd", cwd],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "missing end\n",
+        insert_after: "class Target {\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(1);
+    expect(await new Response(proc.stdout).text()).toBe("");
+    const stderr = JSON.parse(await new Response(proc.stderr).text()) as {
+      error: {
+        code: string;
+        message: string;
+        src_start_matches: number;
+        src_start_line_ranges: Array<{ start: number; end: number }>;
+        src_end_matches: number;
+        src_end_matches_after_start: number;
+        suggested_action: string;
+      };
+    };
+    expect(stderr.error).toMatchObject({
+      code: "source_not_found",
+      src_start_matches: 1,
+      src_start_line_ranges: [{ start: 2, end: 2 }],
+      src_end_matches: 0,
+      src_end_matches_after_start: 0,
+      suggested_action: "tighten src_end so it appears after the selected src_start"
+    });
+    expect(stderr.error.message).toContain("src_start matched 1 location");
   });
 
   test("move --json-output includes structured match details", async () => {

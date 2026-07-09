@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -54,6 +54,77 @@ describe("moveBlock API", () => {
     });
 
     expect(await readFile(join(cwd, "source.ts"))).toEqual(before);
+  });
+
+  test("source delimiter failures report start and end match diagnostics", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-source-diagnostics-"));
+    await writeFile(join(cwd, "source.ts"), "alpha\nfunction movedThing() {\n  return 42;\n}\nclass Target {\n}\n");
+
+    let error: unknown;
+    try {
+      await moveBlock(
+        {
+          src: "source.ts",
+          src_start: "function movedThing() {\n",
+          src_end: "missing end\n",
+          insert_after: "class Target {\n"
+        },
+        { cwd }
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("src_start matched 1 location");
+    expect((error as BlockPatchError).message).toContain("src_end matched 0 locations after those starts");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "source.ts",
+      phase: "source",
+      anchor: "src_start/src_end",
+      matches: 0,
+      src_start_matches: 1,
+      src_start_line_ranges: [{ start: 2, end: 2 }],
+      src_end_matches: 0,
+      src_end_matches_after_start: 0,
+      suggested_action: "tighten src_end so it appears after the selected src_start"
+    });
+  });
+
+  test("insert_before and insert_after select destination anchors", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-insert-aliases-"));
+    await writeFile(
+      join(cwd, "source.ts"),
+      "alpha\nfunction movedThing() {\n  return 42;\n}\nomega\nclass Target {\n}\n"
+    );
+
+    const result = await moveBlock(
+      {
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        insert_after: "class Target {\n",
+        insert_before: "}\n"
+      },
+      { cwd }
+    );
+
+    expect(result.status).toBe("applied");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
+      "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
+    );
+  });
+
+  test("insert aliases cannot be combined with equivalent target anchors", async () => {
+    await expect(
+      moveBlock({
+        src: "source.ts",
+        src_start: "a",
+        src_end: "b",
+        target_after: "c",
+        insert_before: "c"
+      })
+    ).rejects.toThrow("move cannot combine target_after and insert_before");
   });
 
   test("move to immediately before an anchor that follows the source is a no-op", async () => {
@@ -253,6 +324,36 @@ describe("moveBlock API", () => {
     ).rejects.toThrow("must be relative");
   });
 
+  test("rejects paths that repeat the --cwd suffix", async () => {
+    const root = await mkdtemp(join(tmpdir(), "blockpatch-cwd-prefix-"));
+    const cwd = join(root, "dev", "test1", "shooter");
+    await mkdir(join(cwd, "src", "game"), { recursive: true });
+    await writeFile(join(cwd, "src", "game", "runtime.ts"), "move me\nanchor\n");
+
+    let error: unknown;
+    try {
+      await moveBlock(
+        {
+          src: "dev/test1/shooter/src/game/runtime.ts",
+          src_start: "move me",
+          src_end: "\n",
+          insert_after: "anchor\n"
+        },
+        { cwd, diff: true }
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("operation paths are already relative to --cwd");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "dev/test1/shooter/src/game/runtime.ts",
+      phase: "path",
+      suggested_action: "Use src/game/runtime.ts instead"
+    });
+  });
+
   test("rejects Windows absolute src paths as absolute paths", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-move-win-absolute-"));
     await expect(
@@ -407,7 +508,7 @@ describe("moveBlock API", () => {
     expect(result.patch).toContain("@@ -6,2 +3,5 @@ blockpatch-target id=move-1");
   });
 
-  test("move --diff self-check accepts payload ending in bare CR", async () => {
+  test("move --diff self-validation accepts payload ending in bare CR", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "blockpatch-diff-bare-cr-"));
     await writeFile(join(cwd, "source.ts"), Buffer.from("before\nx\r", "utf8"));
     await writeFile(join(cwd, "target.ts"), "target\n");

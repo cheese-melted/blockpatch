@@ -109,22 +109,26 @@ async function smokeCheckAndApply() {
   await writeFile(join(cwd, "patch.blockpatch"), relocationPatch);
 
   const patchPath = join(cwd, "patch.blockpatch");
-  const checkStdout = runBlockpatch(["check", patchPath, "--cwd", cwd]);
-  assertEqual(checkStdout, "would change file.txt\n", "installed check stdout");
+  const dryRunStdout = runBlockpatch(["apply", patchPath, "--cwd", cwd, "--dry-run"]);
+  assertEqual(dryRunStdout, "dry-run clean: move-1 file.txt:2 -> file.txt:5, 1 line\n", "installed dry-run stdout");
   assertEqual(
     await readFile(join(cwd, "file.txt"), "utf8"),
     "alpha\nmove me\nomega\ntarget\n",
-    "installed check must not modify files"
+    "installed dry-run must not modify files"
   );
 
   const applyStdout = runBlockpatch(["apply", patchPath, "--cwd", cwd]);
-  assertEqual(applyStdout, "changed file.txt\n", "installed apply stdout");
+  assertEqual(
+    applyStdout,
+    "applied: move-1 file.txt:2 -> file.txt:5, 1 line\nchanged: file.txt\n",
+    "installed apply stdout"
+  );
   assertEqual(
     await readFile(join(cwd, "file.txt"), "utf8"),
     "alpha\nomega\ntarget\nmove me\n",
     "installed apply must move the block"
   );
-  console.log("ok: installed blockpatch check/apply");
+  console.log("ok: installed blockpatch dry-run/apply");
 }
 
 async function smokeConformance() {
