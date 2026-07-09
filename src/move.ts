@@ -11,6 +11,7 @@ import {
   matchedLocations
 } from "./errors";
 import { readFileChecked, readFileSnapshot } from "./files";
+import { byteRangeToLineRange, countLines, lineNumberAt, normalizedLimit } from "./locations";
 import {
   applyPatchBytes,
   buildMoveSelection,
@@ -828,13 +829,6 @@ function findDelimitedRanges(file: Buffer, startNeedle: Buffer, endNeedle: Buffe
   return { ranges, truncated: false };
 }
 
-function normalizedLimit(limit: number): number {
-  if (!Number.isFinite(limit)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  return Math.max(0, Math.trunc(limit));
-}
-
 function targetAnchorName(args: NormalizedRelocationArgs | NormalizedInsertionArgs): string {
   return args.targetAnchor;
 }
@@ -1065,41 +1059,6 @@ function renderFileRemovalPatch(
     `@@ -${payloadLines === 0 ? "0,0" : `1,${payloadLines}`} +0,0 @@ blockpatch-source id=${id}`,
     sourceBody
   ].join("\n") + "\n";
-}
-
-function lineNumberAt(file: Buffer, byteIndex: number): number {
-  let line = 1;
-  const end = Math.min(byteIndex, file.length);
-  for (let index = 0; index < end; index += 1) {
-    if (file[index] === 0x0a) {
-      line += 1;
-    }
-  }
-  return line;
-}
-
-function byteRangeToLineRange(file: Buffer, range: ByteRange): { start: number; end: number } {
-  const start = Math.min(Math.max(range.start, 0), file.length);
-  const end = Math.min(Math.max(range.end, start), file.length);
-  const endByte = end > start ? end - 1 : start;
-  return {
-    start: lineNumberAt(file, start),
-    end: lineNumberAt(file, endByte)
-  };
-}
-
-function countLines(bytes: Buffer): number {
-  if (bytes.length === 0) {
-    return 0;
-  }
-
-  let newlines = 0;
-  for (const byte of bytes) {
-    if (byte === 0x0a) {
-      newlines += 1;
-    }
-  }
-  return bytes[bytes.length - 1] === 0x0a ? newlines : newlines + 1;
 }
 
 function joinPatchChunks(chunks: string[]): string {

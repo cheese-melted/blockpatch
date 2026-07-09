@@ -5,6 +5,7 @@ import {
   matchCountDetails,
   matchedLocations
 } from "./errors";
+import { normalizedLimit } from "./locations";
 
 export interface ByteRange {
   start: number;
@@ -128,13 +129,6 @@ export function indexesOfLimitedWhere(
   }
 
   return { matches, truncated: false };
-}
-
-function normalizedLimit(limit: number): number {
-  if (!Number.isFinite(limit)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  return Math.max(0, Math.trunc(limit));
 }
 
 export function rangesOverlap(left: ByteRange, right: ByteRange): boolean {

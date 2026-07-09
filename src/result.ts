@@ -1,4 +1,5 @@
 import { devNull } from "./parser";
+import { byteRangeToLineRange, countLines, lineNumberAt } from "./locations";
 import type { ByteRange, MoveSelection, TargetSelection } from "./matcher";
 import type { ApplyResult, BlockPatch, MoveResultDetails } from "./types";
 
@@ -165,48 +166,11 @@ export function alreadyAppliedMoveResultDetails(args: {
   };
 }
 
-export function byteRangeToLineRange(file: Buffer | undefined, range: ByteRange | null): { start: number; end: number } | null {
-  if (file === undefined || range === null) {
-    return null;
-  }
-  const start = clamp(range.start, 0, file.length);
-  const end = clamp(range.end, start, file.length);
-  const endByte = end > start ? end - 1 : start;
-  return {
-    start: lineNumberAt(file, start),
-    end: lineNumberAt(file, endByte)
-  };
-}
-
 export function lineNumberOrNull(file: Buffer | undefined, byteIndex: number | null): number | null {
   if (file === undefined || byteIndex === null) {
     return null;
   }
   return lineNumberAt(file, clamp(byteIndex, 0, file.length));
-}
-
-export function lineNumberAt(file: Buffer, byteIndex: number): number {
-  let line = 1;
-  const end = Math.min(byteIndex, file.length);
-  for (let index = 0; index < end; index += 1) {
-    if (file[index] === 0x0a) {
-      line += 1;
-    }
-  }
-  return line;
-}
-
-export function countLines(bytes: Buffer): number {
-  if (bytes.length === 0) {
-    return 0;
-  }
-  let lines = 0;
-  for (const byte of bytes) {
-    if (byte === 0x0a) {
-      lines += 1;
-    }
-  }
-  return bytes[bytes.length - 1] === 0x0a ? lines : lines + 1;
 }
 
 function clamp(value: number, min: number, max: number): number {

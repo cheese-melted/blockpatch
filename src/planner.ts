@@ -8,6 +8,7 @@ import {
   matchedLocations
 } from "./errors";
 import { devNull } from "./parser";
+import { normalizedLimit } from "./locations";
 import {
   buildMoveSelection,
   findTargetSelection,
@@ -694,13 +695,6 @@ function findSourceEnvelopes(file: Buffer, patch: BlockPatch, limit = 11): Limit
   }
 
   return { ranges, truncated: false };
-}
-
-function normalizedLimit(limit: number): number {
-  if (!Number.isFinite(limit)) {
-    return Number.POSITIVE_INFINITY;
-  }
-  return Math.max(0, Math.trunc(limit));
 }
 
 export function memoryFileMap(files: readonly InMemoryPatchFile[]): Map<string, InMemoryFileState> {
