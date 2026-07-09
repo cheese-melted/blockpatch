@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmShell = process.platform === "win32";
 const smokeRoot = await mkdtemp(join(tmpdir(), "blockpatch-packed-cli-"));
 const packDir = join(smokeRoot, "pack");
 const installRoot = join(smokeRoot, "install");
@@ -51,9 +51,10 @@ try {
 }
 
 async function packPackage() {
-  const stdout = run(npmCommand, ["pack", "--json", "--pack-destination", packDir], {
+  const stdout = run("npm", ["pack", "--json", "--pack-destination", packDir], {
     cwd: repoRoot,
-    label: "npm pack"
+    label: "npm pack",
+    shell: npmShell
   });
   const [packed] = JSON.parse(stdout);
   assert(packed?.filename, "npm pack must report a tarball filename");
@@ -76,9 +77,10 @@ async function packPackage() {
 }
 
 async function installPackage(tarballPath) {
-  run(npmCommand, ["install", "--global", "--prefix", installRoot, tarballPath], {
+  run("npm", ["install", "--global", "--prefix", installRoot, tarballPath], {
     cwd: repoRoot,
-    label: "npm install packed tarball"
+    label: "npm install packed tarball",
+    shell: npmShell
   });
   console.log("ok: npm install packed tarball");
 }
