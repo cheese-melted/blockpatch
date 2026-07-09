@@ -131,7 +131,8 @@ async function smokeConformance() {
   const stdout = run(conformanceBinPath, [binPath], {
     cwd: workRoot,
     label: "installed blockpatch-conformance",
-    shell: process.platform === "win32"
+    shell: process.platform === "win32",
+    allowedStderr: isNodeShellDeprecationWarning
   });
   assert(stdout.includes("ok 10 conformance cases"), "conformance runner must pass installed blockpatch");
   console.log("ok: installed blockpatch-conformance");
@@ -158,7 +159,7 @@ function run(command, args, options) {
   if (result.error !== undefined) {
     throw result.error;
   }
-  if (result.status !== 0 || result.stderr !== "") {
+  if (result.status !== 0 || !isAllowedStderr(result.stderr, options.allowedStderr)) {
     throw new Error(
       `${options.label} failed\n` +
         `exit: ${String(result.status)}\n` +
@@ -168,6 +169,20 @@ function run(command, args, options) {
   }
 
   return result.stdout;
+}
+
+function isAllowedStderr(stderr, allowedStderr) {
+  return stderr === "" || (allowedStderr !== undefined && allowedStderr(stderr));
+}
+
+function isNodeShellDeprecationWarning(stderr) {
+  return (
+    /^\(node:\d+\) \[DEP0190\] DeprecationWarning: Passing args to a child process with shell option true/m.test(stderr) &&
+    stderr
+      .trim()
+      .split(/\r?\n/)
+      .every((line) => line.includes("[DEP0190]") || line.includes("Use `node --trace-deprecation"))
+  );
 }
 
 function assertEqual(actual, expected, label) {
