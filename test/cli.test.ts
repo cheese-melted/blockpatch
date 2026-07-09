@@ -28,9 +28,8 @@ describe("CLI", () => {
     expect(stdout).toContain("# before: src/foo.ts");
     expect(stdout).toContain("export function movedThing() {");
     expect(stdout).toContain("# before: src/bar.ts");
-    expect(stdout).toContain("blockpatch move --json - --diff --output patch.blockpatch <<'JSON'");
+    expect(stdout).toContain("blockpatch move --json - --diff --output patch.blockpatch --dry-run <<'JSON'");
     expect(stdout).toContain("\"src\": \"src/foo.ts\"");
-    expect(stdout).toContain("blockpatch apply patch.blockpatch --dry-run");
     expect(stdout).toContain("blockpatch apply patch.blockpatch");
     expect(stdout).toContain("# after: src/foo.ts");
     expect(stdout).toContain("# after: src/bar.ts");
@@ -86,6 +85,43 @@ describe("CLI", () => {
     expect(stdout).toContain("blockpatch plan");
     expect(stdout).toContain("JSON envelope");
     expect(stdout).toContain("jq -r .patch plan.json > patch.blockpatch");
+  });
+
+  test("help lists parser-backed flags", async () => {
+    const cases = [
+      ["apply", ["--patch", "--cwd", "--strip", "--dry-run", "--reverse", "--json-output", "--explain"]],
+      [
+        "move",
+        [
+          "--json",
+          "--cwd",
+          "--dry-run",
+          "--diff",
+          "--output",
+          "--src-start",
+          "--insert-before",
+          "--target-after",
+          "--expected-payload-sha256"
+        ]
+      ],
+      ["plan", ["--json", "--cwd", "--json-output", "--explain"]],
+      ["version", ["--json-output"]]
+    ] as const;
+
+    for (const [command, flags] of cases) {
+      const proc = Bun.spawn({
+        cmd: ["bun", join(import.meta.dir, "../src/cli.ts"), "help", command],
+        stdout: "pipe",
+        stderr: "pipe"
+      });
+
+      expect(await proc.exited).toBe(0);
+      expect(await new Response(proc.stderr).text()).toBe("");
+      const stdout = await new Response(proc.stdout).text();
+      for (const flag of flags) {
+        expect(stdout).toContain(flag);
+      }
+    }
   });
 
   test("all commands accept --help", async () => {
@@ -840,6 +876,48 @@ describe("CLI", () => {
     expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(
       "alpha\nomega\nclass Target {\nfunction movedThing() {\n  return 42;\n}\n}\n"
     );
+  });
+
+  test("move --diff --output --dry-run writes patch and prints validation summary", async () => {
+    const cwd = await moveFixture();
+    const before = await readFile(join(cwd, "source.ts"), "utf8");
+    const outputPath = join(cwd, "patch.blockpatch");
+    const proc = Bun.spawn({
+      cmd: [
+        "bun",
+        join(import.meta.dir, "../src/cli.ts"),
+        "move",
+        "--json",
+        "-",
+        "--diff",
+        "--output",
+        outputPath,
+        "--dry-run",
+        "--cwd",
+        cwd
+      ],
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe"
+    });
+    proc.stdin.write(
+      JSON.stringify({
+        src: "source.ts",
+        src_start: "function movedThing() {\n",
+        src_end: "}\n",
+        insert_after: "class Target {\n",
+        insert_before: "}\n"
+      })
+    );
+    proc.stdin.end();
+
+    expect(await proc.exited).toBe(0);
+    expect(await new Response(proc.stdout).text()).toBe("dry-run clean: move-1 source.ts:2-4 -> source.ts:7, 3 lines\n");
+    expect(await new Response(proc.stderr).text()).toBe("");
+    expect(await readFile(join(cwd, "source.ts"), "utf8")).toBe(before);
+    const patch = await readFile(outputPath, "utf8");
+    expect(patch).toContain("diff --blockpatch a/source.ts b/source.ts");
+    expect(patch).toContain("blockpatch move id=move-1 payload-sha256=");
   });
 
   test("move --diff --output leaves existing output untouched on failure", async () => {

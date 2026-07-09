@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -322,6 +322,36 @@ describe("moveBlock API", () => {
         { cwd }
       )
     ).rejects.toThrow("must be relative");
+  });
+
+  test("rejects paths that repeat the --cwd suffix", async () => {
+    const root = await mkdtemp(join(tmpdir(), "blockpatch-cwd-prefix-"));
+    const cwd = join(root, "dev", "test1", "shooter");
+    await mkdir(join(cwd, "src", "game"), { recursive: true });
+    await writeFile(join(cwd, "src", "game", "runtime.ts"), "move me\nanchor\n");
+
+    let error: unknown;
+    try {
+      await moveBlock(
+        {
+          src: "dev/test1/shooter/src/game/runtime.ts",
+          src_start: "move me",
+          src_end: "\n",
+          insert_after: "anchor\n"
+        },
+        { cwd, diff: true }
+      );
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("operation paths are already relative to --cwd");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "dev/test1/shooter/src/game/runtime.ts",
+      phase: "path",
+      suggested_action: "Use src/game/runtime.ts instead"
+    });
   });
 
   test("rejects Windows absolute src paths as absolute paths", async () => {

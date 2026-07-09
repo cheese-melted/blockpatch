@@ -7,13 +7,13 @@ This document lists the supported CLI forms. For `.blockpatch`, move JSON, and J
 ```sh
 blockpatch apply patch.blockpatch --dry-run
 blockpatch apply patch.blockpatch
+blockpatch move --json - --diff --output patch.blockpatch --dry-run
 blockpatch plan --json -
-blockpatch move --json - --diff --output patch.blockpatch
 ```
 
-`apply --dry-run` validates through the apply path without writing. `apply` writes the verified result. `plan` returns a reviewable `.blockpatch` for a move JSON request without writing; `move` applies the request directly.
+`apply --dry-run` validates through the apply path without writing. `apply` writes the verified result. `move --json - --diff --output ... --dry-run` returns a reviewable `.blockpatch` for a move JSON request and prints the validation summary without writing the target tree; `move --json -` applies the request directly.
 
-Use `move --json - --diff --output patch.blockpatch` when you want a reviewable `.blockpatch` artifact and no target-tree writes. Use `plan --json -` when an agent or script needs metadata and patch text together. Use `apply --dry-run` to validate a reviewed patch before `apply`.
+Use `move --json - --diff --output patch.blockpatch --dry-run` when you want a reviewable `.blockpatch` artifact plus a validation summary and no target-tree writes. Use `apply --dry-run` when you want to validate a reviewed patch file later before `apply`. Use `plan --json -` only when an agent or script needs metadata and patch text together.
 
 For CLI reminders:
 
@@ -42,6 +42,8 @@ blockpatch apply --cwd repo-root --strip 1 --dry-run < patch.blockpatch
 
 `-d`/`--directory` is an alias for `--cwd`. `-pN`/`--strip N` strips leading path components from patch-declared file paths. Unlike GNU `patch`, the default is `-p1`, matching the git-style `a/`/`b/` prefixes; use `-p0` only if your working tree contains literal `a/` and `b/` directories.
 
+Patch-declared paths and move JSON `src`/`dst` are operation paths inside `--cwd`. For `--cwd /home/alan/dev/test1/shooter`, use `src/game/file.ts`, not `dev/test1/shooter/src/game/file.ts`. Patch input files, move JSON input files, and `--output` are normal CLI paths and may be absolute.
+
 ## Reverse
 
 ```sh
@@ -54,14 +56,14 @@ blockpatch apply patch.blockpatch -R --dry-run
 ## Move JSON Input
 
 ```sh
-blockpatch plan --json -
 blockpatch move --json -
 blockpatch move --json - --diff --json-output
-blockpatch move --json - --diff --output patch.blockpatch
+blockpatch move --json - --diff --output patch.blockpatch --dry-run
+blockpatch plan --json -
 blockpatch move --json move.json
 ```
 
-`--json -` reads the move request from stdin; `--json move.json` reads the same shape from a file. `plan` is shorthand for `move --json - --diff --json-output`: it validates the request and returns the rendered `.blockpatch` in the JSON `patch` field without writing. On `move`, `--dry-run` validates without writing, and `--diff` never writes to the target tree: it prints the rendered patch, returns it in the JSON `patch` field with `--json-output`, or writes it atomically with `--output`.
+`--json -` reads the move request from stdin; `--json move.json` reads the same shape from a file. On `move`, `--dry-run` validates without writing, and `--diff` never writes to the target tree: it prints the rendered patch, returns it in the JSON `patch` field with `--json-output`, or writes it atomically with `--output`. When `--diff --output` is combined with `--dry-run`, the patch is written to the output file and the dry-run summary is printed to stdout. `plan` is the same planning operation as `move --json - --diff --json-output`, but exposed as a JSON-envelope command.
 
 Use `--output <patch.blockpatch>` instead of shell redirection when you want an existing patch file left untouched if rendering fails.
 

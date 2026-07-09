@@ -10,6 +10,7 @@ import {
   fixtureCase,
   fixtureRoot,
   hardlinkOrSkip,
+  pathExists,
   symlinkOrSkip
 } from "./helpers";
 
@@ -158,6 +159,41 @@ describe("format hardening", () => {
       "must not contain . or .. path segments"
     );
     expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
+  });
+
+  test("patch paths may not repeat the --cwd suffix", async () => {
+    const root = await mkdtemp(join(tmpdir(), "blockpatch-cwd-prefix-"));
+    const cwd = join(root, "dev", "test1", "shooter");
+    await mkdir(join(cwd, "src", "game"), { recursive: true });
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      [
+        "diff --blockpatch /dev/null b/dev/test1/shooter/src/game/runtime.ts",
+        "blockpatch version 1",
+        "blockpatch move id=move-1 role=target payload-sha256=0f15384d18789b1ebf3043dc7b6bc27273c8576373fbeb6f3e15854b588141c0",
+        "--- /dev/null",
+        "+++ b/dev/test1/shooter/src/game/runtime.ts",
+        "@@ -0,0 +1,1 @@ blockpatch-target id=move-1",
+        "+new file",
+        ""
+      ].join("\n")
+    );
+
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).message).toContain("operation paths are already relative to --cwd");
+    expect((error as BlockPatchError).details).toMatchObject({
+      path: "dev/test1/shooter/src/game/runtime.ts",
+      phase: "path",
+      suggested_action: "Use src/game/runtime.ts instead"
+    });
+    expect(await pathExists(join(cwd, "dev"))).toBe(false);
   });
 
   test("patch paths may not use in-tree symlinks", async () => {

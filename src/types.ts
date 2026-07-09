@@ -1,11 +1,13 @@
 import type { Buffer } from "node:buffer";
 import type { BlockPatchErrorCode } from "./errors";
 
+export type Endpoint = { kind: "file"; path: string } | { kind: "null" };
+
 export interface BlockPatch {
   type: "move";
   id: string;
-  src: string | null;
-  dst: string | null;
+  src: Endpoint;
+  dst: Endpoint;
   payloadSha256: string;
   hasSourceHunk: boolean;
   sourceBefore: Buffer;

@@ -12,7 +12,9 @@ The payload hash is checked before any write happens. For paired moves, the sour
 
 ## Planning And Retry Flow
 
-`plan --json -` is the canonical planning handshake. It is a thin alias for `blockpatch move --json - --diff --json-output`: it validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, validates that patch in memory, lists affected files, and returns the patch in the JSON `patch` field without mutating the working tree.
+`move --json - --diff --output patch.blockpatch --dry-run` is the primary planning handshake. It validates the provided source delimiters and/or target anchors, computes byte ranges, hashes the selected or supplied payload, renders the exact reviewable `.blockpatch`, validates that patch in memory, writes the patch artifact atomically, and prints the dry-run summary without mutating the target tree. Use `move --json - --diff --json-output` when the caller wants the same patch in a JSON `patch` field.
+
+`plan --json -` is the equivalent JSON-envelope form for scripts that want validation metadata and patch text together.
 
 `move --json --diff` is a planner for the current tree. For relocation, in-file deletion, and whole-file removal, the JSON request selects the payload from the current source file; if that source block or file is already gone, the JSON request often cannot prove the final state because it does not carry the moved bytes. The generated `.blockpatch` is the retry/idempotence artifact because it carries the payload and can report `already_applied` from the final state. Target-only insertion and `create_file` JSON are the exceptions because they include `payload` directly.
 
@@ -28,6 +30,7 @@ Rejected operation paths include:
 - `.` or `..` path segments
 - backslashes; operation paths use POSIX-style `/` separators in `.blockpatch` artifacts and move JSON
 - non-printing control characters
+- paths that appear to repeat the trailing `--cwd` path, such as `dev/test1/shooter/src/file.ts` when `--cwd` is `/home/alan/dev/test1/shooter`
 - paths containing symlink components
 - existing regular files whose real path escapes `--cwd`
 

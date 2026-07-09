@@ -52,6 +52,7 @@ export function resolvePath(cwd: string, path: string, label: string): string {
   validateOperationPath(path, label);
 
   const root = resolve(cwd);
+  rejectCwdPrefixedPath(root, path, label);
   const resolved = resolve(root, path);
   const realRoot = realpathSyncChecked(root, "working directory", root);
 
@@ -81,6 +82,7 @@ export function resolvePathAllowMissing(
   validateOperationPath(path, label);
 
   const root = resolve(cwd);
+  rejectCwdPrefixedPath(root, path, label);
   const resolved = resolve(root, path);
   const realRoot = realpathSyncChecked(root, "working directory", root);
 
@@ -170,6 +172,35 @@ function rejectExistingSymlinkComponents(
     current = next;
   }
   return current;
+}
+
+function rejectCwdPrefixedPath(root: string, path: string, label: string): void {
+  const rootParts = root.split(/[\\/]+/u).filter(Boolean);
+  const pathParts = path.split("/");
+  const maxPrefixLength = Math.min(rootParts.length, pathParts.length - 1);
+
+  for (let length = maxPrefixLength; length >= 2; length -= 1) {
+    const rootSuffix = rootParts.slice(-length);
+    const pathPrefix = pathParts.slice(0, length);
+    if (!sameSegments(rootSuffix, pathPrefix)) {
+      continue;
+    }
+
+    const suggestedPath = pathParts.slice(length).join("/");
+    fail(
+      "invalid_path",
+      `${label} appears to include the working directory path; operation paths are already relative to --cwd: ${path}`,
+      {
+        path,
+        phase: "path",
+        suggested_action: `Use ${suggestedPath} instead`
+      }
+    );
+  }
+}
+
+function sameSegments(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((part, index) => part === right[index]);
 }
 
 function isInside(root: string, path: string): boolean {

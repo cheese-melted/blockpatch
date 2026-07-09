@@ -4,7 +4,7 @@ import { posix } from "node:path";
 import { TextDecoder } from "node:util";
 import { fail } from "./errors";
 import { rejectUnsafeDisplayPath } from "./paths";
-import type { BlockPatch, TargetAnchor } from "./types";
+import type { BlockPatch, Endpoint, TargetAnchor } from "./types";
 
 interface PatchLine {
   body: Buffer;
@@ -214,8 +214,8 @@ function buildPairedBlockPatch(
   return {
     type: "move",
     id: moveId,
-    src,
-    dst,
+    src: fileEndpoint(src),
+    dst: fileEndpoint(dst),
     payloadSha256,
     hasSourceHunk: true,
     sourceBefore: source.before,
@@ -238,8 +238,8 @@ function buildSourceOnlyBlockPatch(
   return {
     type: "move",
     id: section.moveId,
-    src: section.src,
-    dst: section.dst,
+    src: endpointFromSectionPath(section.src),
+    dst: endpointFromSectionPath(section.dst),
     payloadSha256: section.payloadSha256,
     hasSourceHunk: true,
     sourceBefore: source.before,
@@ -266,8 +266,8 @@ function buildTargetOnlyBlockPatch(
   return {
     type: "move",
     id: section.moveId,
-    src: section.src,
-    dst: section.dst,
+    src: endpointFromSectionPath(section.src),
+    dst: endpointFromSectionPath(section.dst),
     payloadSha256: section.payloadSha256,
     hasSourceHunk: false,
     sourceBefore: Buffer.alloc(0),
@@ -275,6 +275,14 @@ function buildTargetOnlyBlockPatch(
     sourceAfter: Buffer.alloc(0),
     target
   };
+}
+
+function endpointFromSectionPath(path: string | null): Endpoint {
+  return path === null ? { kind: "null" } : fileEndpoint(path);
+}
+
+function fileEndpoint(path: string): Endpoint {
+  return { kind: "file", path };
 }
 
 function verifyPayloadHash(payload: Buffer, payloadSha256: string): void {

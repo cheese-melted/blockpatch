@@ -15,26 +15,104 @@ type HelpTopic = "apply" | "move" | "plan" | "version";
 
 const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
 
+interface FlagDefinition {
+  flags: readonly string[];
+  value?: string;
+  description: string;
+}
+
+interface MoveArgFlagDefinition extends FlagDefinition {
+  key: keyof MoveBlockArgs;
+}
+
+const OUTPUT_FLAG_DEFINITIONS = [
+  { flags: ["--json-output"], description: "Write machine-readable JSON output." },
+  { flags: ["--explain"], description: "Imply --json-output and validate without writing." }
+] as const satisfies readonly FlagDefinition[];
+const CWD_FLAG_DEFINITION = {
+  flags: ["--cwd", "--directory", "-d"],
+  value: "<dir>",
+  description: "Set the target working tree for operation paths."
+} as const satisfies FlagDefinition;
+const PATCH_INPUT_FLAG_DEFINITIONS = [
+  { flags: ["--patch"], value: "<patch.blockpatch|->", description: "Read patch input from a path or stdin." }
+] as const satisfies readonly FlagDefinition[];
+const STRIP_FLAG_DEFINITIONS = [
+  { flags: ["-p", "--strip"], value: "<n>", description: "Strip leading path components from patch paths." }
+] as const satisfies readonly FlagDefinition[];
+const DRY_RUN_FLAG_DEFINITION = {
+  flags: ["--dry-run"],
+  description: "Validate without writing."
+} as const satisfies FlagDefinition;
+const REVERSE_FLAG_DEFINITION = {
+  flags: ["--reverse", "-R"],
+  description: "Apply the reviewed patch in reverse."
+} as const satisfies FlagDefinition;
+const DIFF_FLAG_DEFINITION = {
+  flags: ["--diff"],
+  description: "Render a reviewable patch without writing the target tree."
+} as const satisfies FlagDefinition;
+const MOVE_JSON_FLAG_DEFINITIONS = [
+  { flags: ["--json"], value: "<move.json|->", description: "Read one move JSON request from a path or stdin." }
+] as const satisfies readonly FlagDefinition[];
+const MOVE_OUTPUT_FLAG_DEFINITIONS = [
+  { flags: ["--output"], value: "<patch.blockpatch>", description: "With --diff, write the patch atomically to a file." }
+] as const satisfies readonly FlagDefinition[];
+const MOVE_ARG_FLAG_DEFINITIONS = [
+  { flags: ["--src"], value: "<path>", key: "src", description: "Set move JSON src." },
+  { flags: ["--src-start"], value: "<text>", key: "src_start", description: "Set exact source start delimiter." },
+  { flags: ["--src-end"], value: "<text>", key: "src_end", description: "Set exact source end delimiter." },
+  { flags: ["--dst"], value: "<path>", key: "dst", description: "Set move JSON dst." },
+  { flags: ["--payload"], value: "<text>", key: "payload", description: "Set insertion or file-creation payload." },
+  { flags: ["--target-before"], value: "<text>", key: "target_before", description: "Set context before the insertion point." },
+  { flags: ["--target-after"], value: "<text>", key: "target_after", description: "Set context after the insertion point." },
+  { flags: ["--insert-before"], value: "<text>", key: "insert_before", description: "Insert immediately before exact context." },
+  { flags: ["--insert-after"], value: "<text>", key: "insert_after", description: "Insert immediately after exact context." },
+  {
+    flags: ["--expected-payload-sha256"],
+    value: "<hex>",
+    key: "expected_payload_sha256",
+    description: "Require the selected payload to match a sha256 digest."
+  }
+] as const satisfies readonly MoveArgFlagDefinition[];
+const APPLY_FLAG_DEFINITIONS = [
+  ...PATCH_INPUT_FLAG_DEFINITIONS,
+  CWD_FLAG_DEFINITION,
+  ...STRIP_FLAG_DEFINITIONS,
+  { ...DRY_RUN_FLAG_DEFINITION, description: "Validate through apply without writing." },
+  REVERSE_FLAG_DEFINITION,
+  ...OUTPUT_FLAG_DEFINITIONS
+] as const satisfies readonly FlagDefinition[];
+const MOVE_FLAG_DEFINITIONS = [
+  ...MOVE_JSON_FLAG_DEFINITIONS,
+  CWD_FLAG_DEFINITION,
+  { ...DRY_RUN_FLAG_DEFINITION, description: "Validate the direct move without writing." },
+  DIFF_FLAG_DEFINITION,
+  ...MOVE_OUTPUT_FLAG_DEFINITIONS,
+  ...OUTPUT_FLAG_DEFINITIONS
+] as const satisfies readonly FlagDefinition[];
+const PLAN_FLAG_DEFINITIONS = [
+  ...MOVE_JSON_FLAG_DEFINITIONS,
+  CWD_FLAG_DEFINITION,
+  ...OUTPUT_FLAG_DEFINITIONS
+] as const satisfies readonly FlagDefinition[];
+const VERSION_FLAG_DEFINITIONS = [
+  { flags: ["--json-output"], description: "Write machine-readable JSON output." }
+] as const satisfies readonly FlagDefinition[];
+
 // Value-taking flag tables are shared by normal parsing and error-path JSON-output recovery.
-const OUTPUT_FLAGS = new Set(["--json-output", "--explain"]);
-const CWD_VALUE_FLAGS = new Set(["--cwd", "--directory", "-d"]);
-const PATCH_INPUT_VALUE_FLAGS = new Set(["--patch"]);
-const STRIP_VALUE_FLAGS = new Set(["-p", "--strip"]);
+const OUTPUT_FLAGS = new Set(flagNames(OUTPUT_FLAG_DEFINITIONS));
+const CWD_VALUE_FLAGS = new Set(CWD_FLAG_DEFINITION.flags);
+const PATCH_INPUT_VALUE_FLAGS = new Set(flagNames(PATCH_INPUT_FLAG_DEFINITIONS));
+const STRIP_VALUE_FLAGS = new Set(flagNames(STRIP_FLAG_DEFINITIONS));
 const PATCH_VALUE_FLAGS = new Set([...CWD_VALUE_FLAGS, ...PATCH_INPUT_VALUE_FLAGS, ...STRIP_VALUE_FLAGS]);
-const MOVE_JSON_VALUE_FLAGS = new Set(["--json"]);
-const MOVE_OUTPUT_VALUE_FLAGS = new Set(["--output"]);
-const MOVE_KEY_BY_FLAG = {
-  "--src": "src",
-  "--src-start": "src_start",
-  "--src-end": "src_end",
-  "--dst": "dst",
-  "--payload": "payload",
-  "--target-before": "target_before",
-  "--target-after": "target_after",
-  "--insert-before": "insert_before",
-  "--insert-after": "insert_after",
-  "--expected-payload-sha256": "expected_payload_sha256"
-} as const satisfies Partial<Record<string, keyof MoveBlockArgs>>;
+const MOVE_JSON_VALUE_FLAGS = new Set(flagNames(MOVE_JSON_FLAG_DEFINITIONS));
+const MOVE_OUTPUT_VALUE_FLAGS = new Set(flagNames(MOVE_OUTPUT_FLAG_DEFINITIONS));
+const MOVE_KEY_BY_FLAG = Object.fromEntries(
+  MOVE_ARG_FLAG_DEFINITIONS.flatMap((definition) =>
+    definition.flags.map((flag) => [flag, definition.key])
+  )
+) as Partial<Record<string, keyof MoveBlockArgs>>;
 const MOVE_ARG_VALUE_FLAGS = new Set(Object.keys(MOVE_KEY_BY_FLAG));
 const MOVE_VALUE_FLAGS = new Set([
   ...CWD_VALUE_FLAGS,
@@ -42,6 +120,23 @@ const MOVE_VALUE_FLAGS = new Set([
   ...MOVE_OUTPUT_VALUE_FLAGS,
   ...MOVE_ARG_VALUE_FLAGS
 ]);
+
+function flagNames(definitions: readonly Pick<FlagDefinition, "flags">[]): string[] {
+  return definitions.flatMap((definition) => [...definition.flags]);
+}
+
+function formatFlagDefinitions(definitions: readonly FlagDefinition[]): string {
+  const rows = definitions.map((definition) => [
+    `${definition.flags.join(", ")}${definition.value === undefined ? "" : ` ${definition.value}`}`,
+    definition.description
+  ] as const);
+  const width = Math.max(...rows.map(([flags]) => flags.length));
+  return rows.map(([flags, description]) => `  ${flags.padEnd(width)}  ${description}`).join("\n");
+}
+
+function matchesFlag(arg: string, definition: FlagDefinition): boolean {
+  return definition.flags.includes(arg);
+}
 
 interface CliOptions {
   command: Command;
@@ -86,6 +181,8 @@ async function main(argv: string[]): Promise<number> {
       await writeOutputAtomically(options.outputPath, result.patch);
       if (options.jsonOutput) {
         writeSuccess(options, { ...result, patch: undefined, output: options.outputPath });
+      } else if (options.dryRun || args.dry_run === true) {
+        writeChangeResult(options, result, "dry_run");
       }
       return 0;
     }
@@ -246,11 +343,11 @@ function parsePatchArgs(
     if (takeOutputFlag(options, arg)) {
       continue;
     }
-    if (arg === "--dry-run") {
+    if (matchesFlag(arg, DRY_RUN_FLAG_DEFINITION)) {
       options.dryRun = true;
       continue;
     }
-    if (arg === "--reverse" || arg === "-R") {
+    if (matchesFlag(arg, REVERSE_FLAG_DEFINITION)) {
       options.reverse = true;
       continue;
     }
@@ -306,11 +403,11 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
     if (takeOutputFlag(options, arg)) {
       continue;
     }
-    if (arg === "--dry-run") {
+    if (matchesFlag(arg, DRY_RUN_FLAG_DEFINITION)) {
       options.dryRun = true;
       continue;
     }
-    if (arg === "--diff") {
+    if (matchesFlag(arg, DIFF_FLAG_DEFINITION)) {
       options.diff = true;
       continue;
     }
@@ -588,7 +685,7 @@ function printHelp(topic?: HelpTopic): void {
 Usage:
   blockpatch apply [patch.blockpatch|-] [-d <dir>] [-pN] [--dry-run] [--reverse]
   blockpatch plan --json <move.json|-> [--cwd <dir>]
-  blockpatch move --json <move.json|-> [--cwd <dir>] [--dry-run|--diff]
+  blockpatch move --json <move.json|-> [--cwd <dir>] [--dry-run] [--diff] [--output <patch.blockpatch>]
   blockpatch version
 
 Walkthrough:
@@ -604,7 +701,7 @@ Walkthrough:
   # before: src/bar.ts
   export const target = "here";
 
-  blockpatch move --json - --diff --output patch.blockpatch <<'JSON'
+  blockpatch move --json - --diff --output patch.blockpatch --dry-run <<'JSON'
   {
     "src": "src/foo.ts",
     "src_start": "\\nexport function movedThing() {\\n",
@@ -613,7 +710,6 @@ Walkthrough:
     "insert_after": "export const target = \\"here\\";\\n"
   }
   JSON
-  blockpatch apply patch.blockpatch --dry-run
   blockpatch apply patch.blockpatch
 
   # after: src/foo.ts
@@ -648,6 +744,9 @@ Notes:
   Reads from stdin when no patch path is supplied, or when the path is "-".
   --dry-run validates through the apply path without writing.
   -d/--directory sets the target tree; -pN strips patch path components.
+
+Flags:
+${formatFlagDefinitions(APPLY_FLAG_DEFINITIONS)}
 `);
 }
 
@@ -666,12 +765,11 @@ Choose:
   --json - --diff     Print a reviewable .blockpatch and do not write files.
   --output <path>     With --diff, write the patch atomically to a file.
   --json -            Apply the move request directly.
-  --dry-run           Validate the direct move without writing.
+  --dry-run           Validate without writing; with --diff --output, print the summary.
   --json-output       Return the result as JSON; with --diff, patch is in "patch".
 
 Recommended review flow:
-  blockpatch move --json - --diff --output patch.blockpatch
-  blockpatch apply patch.blockpatch --dry-run
+  blockpatch move --json - --diff --output patch.blockpatch --dry-run
   blockpatch apply patch.blockpatch
 
 Example:
@@ -691,6 +789,12 @@ Notes:
   target_before is the context before the insertion point; insertion occurs after it.
   target_after is the context after the insertion point; insertion occurs before it.
   blockpatch never adds separators; include every intended newline in JSON fields.
+
+Flags:
+${formatFlagDefinitions(MOVE_FLAG_DEFINITIONS)}
+
+Move field flags:
+${formatFlagDefinitions(MOVE_ARG_FLAG_DEFINITIONS)}
 `);
 }
 
@@ -706,8 +810,8 @@ Use:
 Equivalent intent:
   blockpatch move --json - --diff --json-output
 
-Choose plan when an agent or script wants metadata and patch text together.
-Choose move --json - --diff --output when a human wants a saved .blockpatch artifact directly.
+Use move --json - --diff --output --dry-run for the normal reviewable patch artifact plus validation summary.
+Use plan when a script needs metadata and patch text together.
 
 Example:
   blockpatch plan --json - <<'JSON' > plan.json
@@ -725,6 +829,9 @@ Example:
 
 The JSON envelope includes ok, changed, affected, status, move byte ranges,
 and patch. apply accepts only the extracted .blockpatch, not the envelope.
+
+Flags:
+${formatFlagDefinitions(PLAN_FLAG_DEFINITIONS)}
 `);
 }
 
@@ -737,6 +844,9 @@ Use:
   blockpatch version [--json-output]
   blockpatch --version [--json-output]
   blockpatch -v [--json-output]
+
+Flags:
+${formatFlagDefinitions(VERSION_FLAG_DEFINITIONS)}
 `);
 }
 
