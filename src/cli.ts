@@ -701,16 +701,16 @@ Walkthrough:
   # before: src/bar.ts
   export const target = "here";
 
-$ blockpatch move --json - --diff --output patch.blockpatch --dry-run <<'JSON'
-{
-  "src": "src/foo.ts",
-  "src_start": "\\nexport function movedThing() {\\n",
-  "src_end": "}\\n",
-  "dst": "src/bar.ts",
-  "insert_after": "export const target = \\"here\\";\\n"
-}
-JSON
-$ blockpatch apply patch.blockpatch
+  $ blockpatch move --json - --diff --output patch.blockpatch --dry-run <<'JSON'
+  {
+    "src": "src/foo.ts",
+    "src_start": "\\nexport function movedThing() {\\n",
+    "src_end": "}\\n",
+    "dst": "src/bar.ts",
+    "insert_after": "export const target = \\"here\\";\\n"
+  }
+  JSON
+  $ blockpatch apply patch.blockpatch
 
   # after: src/foo.ts
   export function keepThing() {

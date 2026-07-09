@@ -28,9 +28,9 @@ describe("CLI", () => {
     expect(stdout).toContain("# before: src/foo.ts");
     expect(stdout).toContain("export function movedThing() {");
     expect(stdout).toContain("# before: src/bar.ts");
-    expect(stdout).toContain("$ blockpatch move --json - --diff --output patch.blockpatch --dry-run <<'JSON'");
+    expect(stdout).toContain("  $ blockpatch move --json - --diff --output patch.blockpatch --dry-run <<'JSON'");
     expect(stdout).toContain("\"src\": \"src/foo.ts\"");
-    expect(stdout).toContain("JSON\n$ blockpatch apply patch.blockpatch");
+    expect(stdout).toContain("  JSON\n  $ blockpatch apply patch.blockpatch");
     expect(stdout).toContain("# after: src/foo.ts");
     expect(stdout).toContain("# after: src/bar.ts");
     expect(stdout).not.toContain("Use this for that:");
