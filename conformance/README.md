@@ -1,6 +1,6 @@
 # blockpatch conformance
 
-These cases exercise the public `.blockpatch` apply/check contract for independent implementations.
+These cases exercise the public `.blockpatch` dry-run/apply contract for independent implementations.
 
 Run against an installed implementation:
 
@@ -20,7 +20,7 @@ node conformance/runner.mjs node dist/cli.js
 The runner invokes the implementation as:
 
 ```sh
-<implementation> check <patch.blockpatch> --cwd <work> --json-output
+<implementation> apply <patch.blockpatch> --cwd <work> --dry-run --json-output
 <implementation> apply <patch.blockpatch> --cwd <work> --json-output
 ```
 

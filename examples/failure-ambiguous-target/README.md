@@ -3,7 +3,7 @@
 Demonstrates strict target matching. The target anchor appears twice, so `blockpatch` refuses to guess.
 
 ```sh
-blockpatch check patch.blockpatch -d work
+blockpatch apply patch.blockpatch -d work --dry-run
 ```
 
 Expected error: `Target anchor is ambiguous`.

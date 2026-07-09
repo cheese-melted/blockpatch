@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
+import { TextDecoder } from "node:util";
 import { fail } from "./errors";
 import { rejectUnsafeDisplayPath } from "./paths";
 import type { BlockPatch, TargetAnchor } from "./types";
@@ -36,6 +37,10 @@ export const devNull = "/dev/null";
 const noNewlineMarker = "\\ No newline at end of file";
 const movePrefix = "blockpatch move ";
 const allowedMetadataKeys = new Set(["id", "payload-sha256", "role"]);
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const diffPrefix = Buffer.from("diff --blockpatch ", "ascii");
+const hunkHeaderPrefix = Buffer.from("@@ ", "ascii");
+const noNewlineMarkerBytes = Buffer.from(noNewlineMarker, "ascii");
 const hunkPattern =
   /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@ blockpatch-(source|target) id=([^\s]+)(?: .*)?$/;
 
@@ -289,7 +294,7 @@ function parseSections(lines: PatchLine[], stripComponents: number): Section[] {
 
   const starts: number[] = [];
   for (let index = 0; index < lines.length; index += 1) {
-    if (text(lines[index])?.startsWith("diff --blockpatch ") === true) {
+    if (lineStartsWith(lines[index], diffPrefix)) {
       starts.push(index);
     }
   }
@@ -335,6 +340,8 @@ function parseSection(
   if (text(lines[start])?.trimEnd() !== `diff --blockpatch ${oldRawPath} ${newRawPath}`) {
     fail("parse_error", "diff --blockpatch paths must match the --- and +++ headers");
   }
+  validatePatchDeclaredPath(oldRawPath, "--- file header path");
+  validatePatchDeclaredPath(newRawPath, "+++ file header path");
 
   let hunkStart = start + 5;
   while (hunkStart < end && text(lines[hunkStart]) === "") {
@@ -384,18 +391,17 @@ function parseHunks(lines: PatchLine[], start: number, end: number): Hunk[] {
     index += 1;
 
     while (index < end) {
-      const maybeHeader = text(lines[index]);
-      if (parseHunkHeader(maybeHeader) !== undefined) {
+      const body = lines[index].body;
+      if (isHunkHeaderLine(lines[index])) {
         break;
       }
 
-      const body = lines[index].body;
       if (body.length === 0) {
         let lookahead = index + 1;
         while (lookahead < end && lines[lookahead].body.length === 0) {
           lookahead += 1;
         }
-        if (lookahead < end && parseHunkHeader(text(lines[lookahead])) === undefined) {
+        if (lookahead < end && !isHunkHeaderLine(lines[lookahead])) {
           fail(
             "parse_error",
             "Hunk bodies must not contain blank lines; encode an empty context line as a single space"
@@ -410,7 +416,7 @@ function parseHunks(lines: PatchLine[], start: number, end: number): Hunk[] {
       }
 
       let content = Buffer.concat([body.subarray(1), lines[index].eol]);
-      if (index + 1 < lines.length && text(lines[index + 1]) === noNewlineMarker) {
+      if (index + 1 < lines.length && lineEquals(lines[index + 1], noNewlineMarkerBytes)) {
         const bareCr = lines[index].eol[0] === 0x0d ? lines[index].eol.subarray(0, 1) : Buffer.alloc(0);
         content = Buffer.concat([body.subarray(1), bareCr]);
         index += 1;
@@ -432,6 +438,10 @@ function parseHunks(lines: PatchLine[], start: number, end: number): Hunk[] {
 
 function samePatchPath(left: string, right: string): boolean {
   return posix.normalize(left) === posix.normalize(right);
+}
+
+function isHunkHeaderLine(line: PatchLine | undefined): boolean {
+  return lineStartsWith(line, hunkHeaderPrefix) && parseHunkHeader(text(line)) !== undefined;
 }
 
 function parseHunkHeader(
@@ -599,6 +609,30 @@ function stripPath(path: string, stripComponents: number): string {
   return stripped;
 }
 
+function validatePatchDeclaredPath(path: string, label: string): void {
+  if (path === devNull) {
+    return;
+  }
+  if (path.includes("\\")) {
+    fail("invalid_path", `${label} must use POSIX-style / separators: ${path}`, {
+      path,
+      phase: "path"
+    });
+  }
+  if (path.split("/").some((part) => part === "." || part === "..")) {
+    fail("invalid_path", `${label} must not contain . or .. path segments: ${path}`, {
+      path,
+      phase: "path"
+    });
+  }
+  if (path.split("/").some((part) => part === "")) {
+    fail("invalid_path", `${label} must not contain empty path segments: ${path}`, {
+      path,
+      phase: "path"
+    });
+  }
+}
+
 function splitLines(input: Buffer): PatchLine[] {
   const lines: PatchLine[] = [];
   let position = 0;
@@ -628,5 +662,22 @@ function splitLines(input: Buffer): PatchLine[] {
 }
 
 function text(line: PatchLine | undefined): string | undefined {
-  return line?.body.toString("utf8");
+  if (line === undefined) {
+    return undefined;
+  }
+  try {
+    return utf8Decoder.decode(line.body);
+  } catch {
+    fail("invalid_utf8", "Patch control line is not valid UTF-8", {
+      phase: "parse"
+    });
+  }
+}
+
+function lineStartsWith(line: PatchLine | undefined, prefix: Buffer): boolean {
+  return line?.body.subarray(0, prefix.length).equals(prefix) === true;
+}
+
+function lineEquals(line: PatchLine | undefined, expected: Buffer): boolean {
+  return line?.body.equals(expected) === true;
 }

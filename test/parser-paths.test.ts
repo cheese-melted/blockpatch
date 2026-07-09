@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { applyPatchFile } from "../src/engine";
+import { BlockPatchError } from "../src/errors";
 import { moveBlock } from "../src/move";
 import {
   fixtureCase,
@@ -153,7 +154,9 @@ describe("format hardening", () => {
       )
     );
 
-    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("escapes the working directory");
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain . or .. path segments"
+    );
     expect(await readFile(join(parent, "outside.txt"), "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
   });
 
@@ -250,7 +253,9 @@ describe("format hardening", () => {
       )
     );
 
-    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow("must be relative");
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain empty path segments"
+    );
     expect(await readFile(absolutePath, "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
   });
 
@@ -299,6 +304,74 @@ describe("format hardening", () => {
 
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
       "must not contain . or .. path segments"
+    );
+  });
+
+  test("raw patch paths reject dot segments before -p stripping can hide them", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-raw-dot-segment-path-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "../file.txt",
+        "../file.txt",
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd, stripComponents: 2 })).rejects.toThrow(
+      "must not contain . or .. path segments"
+    );
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nmove me\nomega\ntarget\n");
+  });
+
+  test("raw patch paths reject interior dot segments before high -p stripping", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-raw-inner-dot-path-"));
+    await writeFile(join(cwd, "bar.txt"), "alpha\nmove me\nomega\ntarget\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "foo/../bar.txt",
+        "foo/../bar.txt",
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd, stripComponents: 3 })).rejects.toThrow(
+      "must not contain . or .. path segments"
+    );
+    expect(await readFile(join(cwd, "bar.txt"), "utf8")).toBe("alpha\nmove me\nomega\ntarget\n");
+  });
+
+  test("raw patch paths reject empty segments before normalization", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-empty-raw-segment-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      patchFor(
+        "move me\n",
+        "/file.txt",
+        "/file.txt",
+        "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n alpha\n-move me\n omega\n",
+        "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n target\n+move me\n"
+      )
+    );
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
+      "must not contain empty path segments"
+    );
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("alpha\nmove me\nomega\ntarget\n");
+  });
+
+  test("high -p values that remove the whole path are rejected", async () => {
+    const cwd = await fixtureCase("success");
+
+    await expect(applyPatchFile("patch.blockpatch", { cwd, stripComponents: 3 })).rejects.toThrow(
+      "-p3 removes the entire path"
     );
   });
 
@@ -465,6 +538,107 @@ describe("format hardening", () => {
 
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
       "must not contain blank lines"
+    );
+  });
+
+  test("parser rejects invalid UTF-8 in control lines", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-invalid-control-utf8-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    const payload = Buffer.from("move me\n");
+    const sha = createHash("sha256").update(payload).digest("hex");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      Buffer.concat([
+        Buffer.from("diff --blockpatch a/file.txt b/file.txt\nblockpatch version "),
+        Buffer.from([0xff]),
+        Buffer.from(
+          `\nblockpatch move id=move-1 payload-sha256=${sha}\n` +
+            "--- a/file.txt\n" +
+            "+++ b/file.txt\n" +
+            "\n" +
+            "@@ -1,3 +1,2 @@ blockpatch-source id=move-1\n" +
+            " alpha\n" +
+            "-move me\n" +
+            " omega\n" +
+            "\n" +
+            "@@ -4,1 +4,2 @@ blockpatch-target id=move-1\n" +
+            " target\n" +
+            "+move me\n"
+        )
+      ])
+    );
+
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("invalid_utf8");
+  });
+
+  test("parser rejects invalid UTF-8 in hunk headers", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-invalid-hunk-utf8-"));
+    await writeFile(join(cwd, "file.txt"), "alpha\nmove me\nomega\ntarget\n");
+    const payload = Buffer.from("move me\n");
+    const sha = createHash("sha256").update(payload).digest("hex");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      Buffer.concat([
+        Buffer.from(
+          "diff --blockpatch a/file.txt b/file.txt\n" +
+            "blockpatch version 1\n" +
+            `blockpatch move id=move-1 payload-sha256=${sha}\n` +
+            "--- a/file.txt\n" +
+            "+++ b/file.txt\n" +
+            "\n" +
+            "@@ "
+        ),
+        Buffer.from([0xff]),
+        Buffer.from("\n alpha\n-move me\n omega\n")
+      ])
+    );
+
+    let error: unknown;
+    try {
+      await applyPatchFile("patch.blockpatch", { cwd });
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(BlockPatchError);
+    expect((error as BlockPatchError).code).toBe("invalid_utf8");
+  });
+
+  test("parser preserves invalid UTF-8 inside hunk payload bytes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "blockpatch-invalid-payload-utf8-"));
+    await writeFile(join(cwd, "file.txt"), Buffer.from("alpha\nomega\n"));
+    const payload = Buffer.from([0xff, 0x0a]);
+    const sha = createHash("sha256").update(payload).digest("hex");
+    await writeFile(
+      join(cwd, "patch.blockpatch"),
+      Buffer.concat([
+        Buffer.from(
+          "diff --blockpatch a/file.txt b/file.txt\n" +
+            "blockpatch version 1\n" +
+            `blockpatch move id=move-1 payload-sha256=${sha}\n` +
+            "--- a/file.txt\n" +
+            "+++ b/file.txt\n" +
+            "\n" +
+            "@@ -1,2 +1,3 @@ blockpatch-target id=move-1\n" +
+            " alpha\n" +
+            "+"
+        ),
+        Buffer.from([0xff]),
+        Buffer.from("\n omega\n")
+      ])
+    );
+
+    await applyPatchFile("patch.blockpatch", { cwd });
+    expect(await readFile(join(cwd, "file.txt"))).toEqual(
+      Buffer.concat([Buffer.from("alpha\n"), payload, Buffer.from("omega\n")])
     );
   });
 

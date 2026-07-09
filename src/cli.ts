@@ -1,24 +1,28 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+import { rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
 import { BlockPatchError } from "./errors";
-import { applyPatchBytes, applyPatchFile, checkPatchBytes, checkPatchFile } from "./engine";
+import { applyPatchBytes, applyPatchFile } from "./engine";
 import { readFileChecked } from "./files";
 import { moveBlock } from "./move";
 import type { BlockPatchErrorCode } from "./errors";
-import type { ApplyResult, MoveBlockArgs, MoveBlockResult } from "./types";
+import type { ApplyResult, MoveBlockArgs, MoveBlockResult, MoveResultDetails } from "./types";
 
-type Command = "apply" | "check" | "move" | "plan" | "help" | "version";
+type Command = "apply" | "move" | "plan" | "help" | "version";
+type HelpTopic = "apply" | "move" | "plan" | "version";
 
 const packageJson = createRequire(import.meta.url)("../package.json") as { version: string };
 
 // Value-taking flag tables are shared by normal parsing and error-path JSON-output recovery.
 const OUTPUT_FLAGS = new Set(["--json-output", "--explain"]);
 const CWD_VALUE_FLAGS = new Set(["--cwd", "--directory", "-d"]);
-const PATCH_INPUT_VALUE_FLAGS = new Set(["-i", "--input"]);
+const PATCH_INPUT_VALUE_FLAGS = new Set(["--patch"]);
 const STRIP_VALUE_FLAGS = new Set(["-p", "--strip"]);
 const PATCH_VALUE_FLAGS = new Set([...CWD_VALUE_FLAGS, ...PATCH_INPUT_VALUE_FLAGS, ...STRIP_VALUE_FLAGS]);
 const MOVE_JSON_VALUE_FLAGS = new Set(["--json"]);
+const MOVE_OUTPUT_VALUE_FLAGS = new Set(["--output"]);
 const MOVE_KEY_BY_FLAG = {
   "--src": "src",
   "--src-start": "src_start",
@@ -27,10 +31,17 @@ const MOVE_KEY_BY_FLAG = {
   "--payload": "payload",
   "--target-before": "target_before",
   "--target-after": "target_after",
+  "--insert-before": "insert_before",
+  "--insert-after": "insert_after",
   "--expected-payload-sha256": "expected_payload_sha256"
 } as const satisfies Partial<Record<string, keyof MoveBlockArgs>>;
 const MOVE_ARG_VALUE_FLAGS = new Set(Object.keys(MOVE_KEY_BY_FLAG));
-const MOVE_VALUE_FLAGS = new Set([...CWD_VALUE_FLAGS, ...MOVE_JSON_VALUE_FLAGS, ...MOVE_ARG_VALUE_FLAGS]);
+const MOVE_VALUE_FLAGS = new Set([
+  ...CWD_VALUE_FLAGS,
+  ...MOVE_JSON_VALUE_FLAGS,
+  ...MOVE_OUTPUT_VALUE_FLAGS,
+  ...MOVE_ARG_VALUE_FLAGS
+]);
 
 interface CliOptions {
   command: Command;
@@ -43,13 +54,15 @@ interface CliOptions {
   stripComponents: number;
   moveArgs?: MoveBlockArgs;
   moveJsonPath?: string;
+  outputPath?: string;
+  helpTopic?: HelpTopic;
 }
 
 async function main(argv: string[]): Promise<number> {
   const options = parseArgs(argv);
 
   if (options.command === "help") {
-    printHelp();
+    printHelp(options.helpTopic);
     return 0;
   }
 
@@ -66,38 +79,34 @@ async function main(argv: string[]): Promise<number> {
       diff: options.diff
     });
 
+    if (options.outputPath !== undefined) {
+      if (!options.diff || result.patch === undefined) {
+        throw new BlockPatchError("invalid_option", "--output is only valid with move --diff");
+      }
+      await writeOutputAtomically(options.outputPath, result.patch);
+      if (options.jsonOutput) {
+        writeSuccess(options, { ...result, patch: undefined, output: options.outputPath });
+      }
+      return 0;
+    }
+
     if (options.diff && result.patch !== undefined) {
       writeSuccess(options, result, result.patch);
       return 0;
     }
 
-    writeChangeResult(options, result, options.dryRun || args.dry_run === true ? "would change" : "changed");
+    writeChangeResult(options, result, options.dryRun || args.dry_run === true ? "dry_run" : "apply");
     return 0;
   }
 
   const result = await runPatchCommand(options);
-  const verb = options.command === "check" || options.dryRun ? "would change" : "changed";
-  writeChangeResult(options, result, verb);
+  writeChangeResult(options, result, options.dryRun ? "dry_run" : "apply");
   return 0;
 }
 
 async function runPatchCommand(options: CliOptions): Promise<ApplyResult> {
   const patchPath = options.patchPath ?? "-";
   const inputPatchPath = patchPath === "-" ? patchPath : resolve(patchPath);
-
-  if (options.command === "check") {
-    return patchPath === "-"
-      ? checkPatchBytes(await readStdin(), {
-          cwd: options.cwd,
-          reverse: options.reverse,
-          stripComponents: options.stripComponents
-        })
-      : checkPatchFile(inputPatchPath, {
-          cwd: options.cwd,
-          reverse: options.reverse,
-          stripComponents: options.stripComponents
-        });
-  }
 
   return patchPath === "-"
     ? applyPatchBytes(await readStdin(), {
@@ -137,7 +146,7 @@ async function loadMoveArgs(options: CliOptions): Promise<MoveBlockArgs> {
         {
           field: "src",
           suggested_action:
-            "Use fields like src, src_start, src_end, dst, target_before, target_after, payload, or run blockpatch help"
+            "Use fields like src, src_start, src_end, dst, insert_before, insert_after, payload, or run blockpatch help"
         }
       );
     }
@@ -160,11 +169,36 @@ function parseArgs(argv: string[]): CliOptions {
   const outputFlags = takeLeadingOutputFlags(args);
   const first = args.shift();
 
-  if (first === undefined || first === "help" || first === "--help" || first === "-h") {
+  if (first === undefined || first === "--help" || first === "-h") {
     return base("help", outputFlags.jsonOutput);
   }
 
+  if (first === "help") {
+    const options = base("help", outputFlags.jsonOutput);
+    const topic = args.shift();
+    if (topic !== undefined) {
+      if (!isHelpTopic(topic)) {
+        throw new BlockPatchError("unknown_command", `Unknown help topic: ${topic}`);
+      }
+      options.helpTopic = topic;
+    }
+    for (const arg of args) {
+      if (isOutputFlag(arg)) {
+        options.jsonOutput = true;
+        continue;
+      }
+      throw new BlockPatchError("too_many_args", `Unexpected argument: ${arg}`);
+    }
+    return options;
+  }
+
   if (first === "version" || first === "--version" || first === "-v") {
+    if (args.length === 1 && (args[0] === "--help" || args[0] === "-h" || args[0] === "help")) {
+      const help = base("help", outputFlags.jsonOutput);
+      help.helpTopic = "version";
+      return help;
+    }
+
     const options = base("version", outputFlags.jsonOutput);
     for (const arg of args) {
       if (isOutputFlag(arg)) {
@@ -179,8 +213,14 @@ function parseArgs(argv: string[]): CliOptions {
     return options;
   }
 
-  if (first !== "apply" && first !== "check" && first !== "move" && first !== "plan") {
+  if (first !== "apply" && first !== "move" && first !== "plan") {
     throw new BlockPatchError("unknown_command", `Unknown command: ${first}`);
+  }
+
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h" || args[0] === "help")) {
+    const options = base("help", outputFlags.jsonOutput);
+    options.helpTopic = first;
+    return options;
   }
 
   if (first === "move" || first === "plan") {
@@ -191,7 +231,7 @@ function parseArgs(argv: string[]): CliOptions {
 }
 
 function parsePatchArgs(
-  command: "apply" | "check",
+  command: "apply",
   args: string[],
   jsonOutput: boolean,
   explain: boolean
@@ -230,8 +270,8 @@ function parsePatchArgs(
       setPatchPath(options, requireValue(args, arg, false));
       continue;
     }
-    if (arg?.startsWith("--input=")) {
-      setPatchPath(options, arg.slice("--input=".length));
+    if (arg?.startsWith("--patch=")) {
+      setPatchPath(options, arg.slice("--patch=".length));
       continue;
     }
     const stripComponents = parseStripOption(arg, args);
@@ -243,10 +283,6 @@ function parsePatchArgs(
       throw new BlockPatchError("unknown_option", `Unknown option: ${arg}`);
     }
     setPatchPath(options, arg ?? "");
-  }
-
-  if (command === "check" && options.dryRun) {
-    throw new BlockPatchError("invalid_option", "--dry-run is only valid with apply or move");
   }
 
   return options;
@@ -294,8 +330,16 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
       options.moveJsonPath = requireValue(args, arg, false);
       continue;
     }
+    if (isValueFlag(arg, MOVE_OUTPUT_VALUE_FLAGS)) {
+      options.outputPath = requireValue(args, arg, true);
+      continue;
+    }
     if (arg?.startsWith("--json=")) {
       options.moveJsonPath = arg.slice("--json=".length);
+      continue;
+    }
+    if (arg?.startsWith("--output=")) {
+      options.outputPath = resolve(arg.slice("--output=".length));
       continue;
     }
 
@@ -317,6 +361,10 @@ function parseMoveArgs(command: "move" | "plan", args: string[], jsonOutput: boo
     options.moveArgs = moveArgs as MoveBlockArgs;
   }
 
+  if (options.outputPath !== undefined && (command !== "move" || !options.diff)) {
+    throw new BlockPatchError("invalid_option", "--output is only valid with move --diff");
+  }
+
   return options;
 }
 
@@ -334,6 +382,10 @@ function base(command: Command, jsonOutput: boolean): CliOptions {
     reverse: false,
     stripComponents: 1
   };
+}
+
+function isHelpTopic(value: string): value is HelpTopic {
+  return value === "apply" || value === "move" || value === "plan" || value === "version";
 }
 
 function setPatchPath(options: CliOptions, path: string): void {
@@ -419,25 +471,67 @@ async function readStdin(): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+async function writeOutputAtomically(path: string, text: string): Promise<void> {
+  const directory = dirname(path);
+  const name = basename(path);
+  const tempPath = resolve(directory, `.${name}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  try {
+    await writeFile(tempPath, text, { flag: "wx" });
+    await rename(tempPath, path);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    if (error instanceof BlockPatchError) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    throw new BlockPatchError("io_error", `Could not write output file: ${message}`, { path, phase: "output" });
+  }
+}
+
 function writeChangeResult(
   options: CliOptions,
   result: ApplyResult | MoveBlockResult,
-  verb: "changed" | "would change"
+  mode: "apply" | "dry_run"
 ): void {
   if (options.jsonOutput) {
     writeSuccess(options, result);
     return;
   }
 
-  for (const path of result.changed) {
-    console.log(`${verb} ${path}`);
+  const status = result.status === "applied" && mode === "dry_run" ? "dry-run clean" : result.status.replace("_", " ");
+  for (const move of result.moves) {
+    console.log(`${status}: ${formatMoveSummary(move)}`);
   }
 
-  if (result.changed.length === 0) {
-    for (const path of result.affected) {
-      console.log(`unchanged ${path}`);
-    }
+  if (mode === "apply" && result.changed.length > 0) {
+    console.log(`changed: ${result.changed.join(", ")}`);
   }
+}
+
+function formatMoveSummary(move: MoveResultDetails): string {
+  return `${move.id} ${formatSourceEndpoint(move)} -> ${formatTargetEndpoint(move)}, ${formatLineCount(move.payload_lines)}`;
+}
+
+function formatSourceEndpoint(move: MoveResultDetails): string {
+  return formatEndpoint(move.src, move.source_line_range?.start, move.source_line_range?.end);
+}
+
+function formatTargetEndpoint(move: MoveResultDetails): string {
+  return formatEndpoint(move.dst, move.insert_line ?? move.target_line_range?.start ?? null);
+}
+
+function formatEndpoint(path: string, start: number | null | undefined, end: number | null | undefined = start): string {
+  if (start === null || start === undefined) {
+    return path;
+  }
+  if (end !== null && end !== undefined && end !== start) {
+    return `${path}:${start}-${end}`;
+  }
+  return `${path}:${start}`;
+}
+
+function formatLineCount(lines: number): string {
+  return `${lines} ${lines === 1 ? "line" : "lines"}`;
 }
 
 function writeSuccess(options: CliOptions, result: unknown, plainText?: string): void {
@@ -461,47 +555,188 @@ function objectResult(result: unknown): Record<string, unknown> {
 }
 
 function jsonSuccessMetadata(options: CliOptions): Record<string, unknown> {
-  if (options.command === "apply" || options.command === "check") {
-    return { strip_components: options.stripComponents };
+  if (options.command === "apply") {
+    return {
+      mode: options.dryRun ? "dry_run" : "apply",
+      validation: "clean",
+      strip_components: options.stripComponents
+    };
   }
   return {};
 }
 
-function printHelp(): void {
+function printHelp(topic?: HelpTopic): void {
+  if (topic === "apply") {
+    printApplyHelp();
+    return;
+  }
+  if (topic === "move") {
+    printMoveHelp();
+    return;
+  }
+  if (topic === "plan") {
+    printPlanHelp();
+    return;
+  }
+  if (topic === "version") {
+    printVersionHelp();
+    return;
+  }
+
   console.log(`blockpatch
 
 Usage:
-  blockpatch check [patch.blockpatch|-] [-d <dir>] [-pN] [-R|--reverse] [--json-output|--explain]
-  blockpatch apply [patch.blockpatch|-] [-i <patch.blockpatch>] [-d <dir>] [-pN] [-R|--reverse] [--dry-run] [--json-output|--explain]
-  blockpatch plan --json <path.json|-> [--cwd <dir>]
-  blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--json-output|--explain]
-  blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --target-before <text> --target-after <text> [--expected-payload-sha256 <sha256>]
-  blockpatch move --src /dev/null --dst <path> --payload <text> --target-before <text>
-  blockpatch move --src <path> --src-start <text> --src-end <text> --dst /dev/null
+  blockpatch apply [patch.blockpatch|-] [-d <dir>] [-pN] [--dry-run] [--reverse]
+  blockpatch plan --json <move.json|-> [--cwd <dir>]
+  blockpatch move --json <move.json|-> [--cwd <dir>] [--dry-run|--diff]
   blockpatch version
 
-Move JSON fields:
-  src, dst, src_start, src_end, payload, target_before, target_after,
-  expected_payload_sha256, mode, dry_run
+Walkthrough:
+  # before: src/foo.ts
+  export function keepThing() {
+    return 7;
+  }
 
-Move selection:
-  src_start/src_end are byte-exact, newline-sensitive delimiters. The selected
-  payload starts at src_start and ends after the first following src_end.
+  export function movedThing() {
+    return 42;
+  }
 
-Target anchors:
-  target_before is the exact context immediately before the insertion point,
-  so insertion occurs after it. target_after is the exact context immediately
-  after the insertion point, so insertion occurs before it. With both anchors,
-  insertion occurs between them.
+  # before: src/bar.ts
+  export const target = "here";
 
-Newlines:
-  blockpatch never adds separators. Include every intended newline in
-  src_start/src_end, payload, target_before, or target_after.
+  blockpatch move --json - --diff --output patch.blockpatch <<'JSON'
+  {
+    "src": "src/foo.ts",
+    "src_start": "\\nexport function movedThing() {\\n",
+    "src_end": "}\\n",
+    "dst": "src/bar.ts",
+    "insert_after": "export const target = \\"here\\";\\n"
+  }
+  JSON
+  blockpatch apply patch.blockpatch --dry-run
+  blockpatch apply patch.blockpatch
+
+  # after: src/foo.ts
+  export function keepThing() {
+    return 7;
+  }
+
+  # after: src/bar.ts
+  export const target = "here";
+
+  export function movedThing() {
+    return 42;
+  }
+`);
+}
+
+function printApplyHelp(): void {
+  console.log(`blockpatch apply
+
+Applies a reviewed .blockpatch to the working tree.
+
+Use:
+  blockpatch apply [patch.blockpatch|-] [--patch <patch.blockpatch|->] [-d <dir>] [-pN] [--dry-run] [--reverse] [--json-output|--explain]
 
 Examples:
-  blockpatch move --json - --diff <<'JSON'
-  {"src":"src/a.ts","src_start":"function x() {\\n","src_end":"}\\n","dst":"src/b.ts","target_before":"class B {\\n"}
+  blockpatch apply patch.blockpatch --dry-run
+  blockpatch apply patch.blockpatch
+  blockpatch apply --patch - --dry-run
+  blockpatch apply patch.blockpatch --reverse
+
+Notes:
+  Reads from stdin when no patch path is supplied, or when the path is "-".
+  --dry-run validates through the apply path without writing.
+  -d/--directory sets the target tree; -pN strips patch path components.
+`);
+}
+
+function printMoveHelp(): void {
+  console.log(`blockpatch move
+
+Plans or applies one exact byte-for-byte move request.
+
+Use:
+  blockpatch move --json <path.json|-> [--cwd <dir>] [--dry-run] [--diff] [--output <patch.blockpatch>] [--json-output|--explain]
+  blockpatch move --src <path> --src-start <text> --src-end <text> --dst <path> --insert-before <text>
+  blockpatch move --src /dev/null --dst <path> --payload <text> --insert-after <text>
+  blockpatch move --src <path> --src-start <text> --src-end <text> --dst /dev/null
+
+Choose:
+  --json - --diff     Print a reviewable .blockpatch and do not write files.
+  --output <path>     With --diff, write the patch atomically to a file.
+  --json -            Apply the move request directly.
+  --dry-run           Validate the direct move without writing.
+  --json-output       Return the result as JSON; with --diff, patch is in "patch".
+
+Recommended review flow:
+  blockpatch move --json - --diff --output patch.blockpatch
+  blockpatch apply patch.blockpatch --dry-run
+  blockpatch apply patch.blockpatch
+
+Example:
+  blockpatch move --json - --diff --output patch.blockpatch <<'JSON'
+  {
+    "src": "src/foo.ts",
+    "src_start": "\\nexport function movedThing() {\\n",
+    "src_end": "}\\n",
+    "dst": "src/bar.ts",
+    "insert_after": "export const target = \\"here\\";\\n"
+  }
   JSON
+
+Notes:
+  src_start/src_end and target anchors are exact and newline-sensitive.
+  insert_after inserts after the exact anchor; insert_before inserts before it.
+  target_before is the context before the insertion point; insertion occurs after it.
+  target_after is the context after the insertion point; insertion occurs before it.
+  blockpatch never adds separators; include every intended newline in JSON fields.
+`);
+}
+
+function printPlanHelp(): void {
+  console.log(`blockpatch plan
+
+Validates one move JSON request and returns a JSON envelope with a reviewable
+.blockpatch in the "patch" field. It never writes files.
+
+Use:
+  blockpatch plan --json <path.json|-> [--cwd <dir>] [--json-output|--explain]
+
+Equivalent intent:
+  blockpatch move --json - --diff --json-output
+
+Choose plan when an agent or script wants metadata and patch text together.
+Choose move --json - --diff --output when a human wants a saved .blockpatch artifact directly.
+
+Example:
+  blockpatch plan --json - <<'JSON' > plan.json
+  {
+    "src": "src/foo.ts",
+    "src_start": "\\nexport function movedThing() {\\n",
+    "src_end": "}\\n",
+    "dst": "src/bar.ts",
+    "insert_after": "export const target = \\"here\\";\\n"
+  }
+  JSON
+  jq -r .patch plan.json > patch.blockpatch
+  blockpatch apply patch.blockpatch --dry-run
+  blockpatch apply patch.blockpatch
+
+The JSON envelope includes ok, changed, affected, status, move byte ranges,
+and patch. apply accepts only the extracted .blockpatch, not the envelope.
+`);
+}
+
+function printVersionHelp(): void {
+  console.log(`blockpatch version
+
+Prints the CLI version.
+
+Use:
+  blockpatch version [--json-output]
+  blockpatch --version [--json-output]
+  blockpatch -v [--json-output]
 `);
 }
 
@@ -531,7 +766,7 @@ function hasJsonOutputFlag(argv: string[]): boolean {
   }
 
   const command = args.shift();
-  if (command === "apply" || command === "check") {
+  if (command === "apply") {
     return hasPatchJsonOutputFlag(args);
   }
   if (command === "move") {

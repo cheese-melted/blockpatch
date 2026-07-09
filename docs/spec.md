@@ -85,7 +85,7 @@ Format constraints:
 
 - Every file section must declare `blockpatch version 1` on the line after `diff --blockpatch`.
 - The `a/` and `b/` prefixes are required, and each `diff --blockpatch` line must name the same two raw paths as that section's file headers. The prefixes are consumed by the default `-p1` path stripping ([Commands](commands.md#paths-and-stripping)).
-- Patch-declared paths use POSIX-style `/` separators on every platform. Backslashes, `.`/`..` path segments, and non-printing control characters are rejected instead of normalized or escaped.
+- Patch-declared paths use POSIX-style `/` separators on every platform. Backslashes, empty path segments, `.`/`..` path segments, and non-printing control characters are rejected instead of normalized or escaped.
 - `blockpatch move` metadata keys must be unique. The recognized keys are `id`, `payload-sha256`, and `role`; unknown keys are rejected unless they use the reserved `x-` extension prefix.
 - Source context before and after may each be empty.
 - Target hunks for existing files must include context on at least one side; either side may be empty, but not both.
@@ -177,7 +177,7 @@ Hunk body lines use unified-diff prefixes:
 - `-` for source payload
 - `+` for target payload
 
-The byte content after the prefix is matched exactly, including line endings. The standard `\ No newline at end of file` marker is supported for a hunk body line without a trailing newline.
+Control lines and hunk headers must be valid UTF-8. The byte content after a hunk body prefix is matched exactly, including line endings, and may contain arbitrary bytes. The standard `\ No newline at end of file` marker is supported for a hunk body line without a trailing newline.
 
 Blank lines are separators between the header and hunks. A blank line inside a hunk body is an error; encode an empty context line as a single space.
 
@@ -194,6 +194,8 @@ type MoveBlockArgs = {
   payload?: string
   target_before?: string
   target_after?: string
+  insert_before?: string
+  insert_after?: string
   expected_payload_sha256?: string
   mode?: "create_file" | "remove_file"
   dry_run?: boolean
@@ -208,11 +210,11 @@ Request shapes:
 - For file creation, set `src` to `/dev/null`, set `mode` to `create_file`, and provide `dst` plus `payload`. Empty payload is valid and creates an empty file.
 - For file removal, set `dst` to `/dev/null` and set `mode` to `remove_file`. The whole source file is selected as the payload.
 - `mode` selects the whole-file path shapes; without it, `/dev/null` endpoints denote in-file insertion/deletion. `move --diff` renders the in-file shapes as same-file one-sided sections and the `mode` shapes with `/dev/null` file headers.
-- `target_before`, `target_after`, or both are required for relocation and insertion.
+- `insert_before`, `insert_after`, `target_before`, `target_after`, or a compatible pair are required for relocation and insertion.
 - `payload` is only valid when `src` is `/dev/null`; it must be non-empty for in-file insertion.
 - `expected_payload_sha256` is optional.
 
-`src_start`, `src_end`, `target_before`, and `target_after` are byte-exact and newline-sensitive. Source selection starts at `src_start` and ends after the first following `src_end`; include any leading or trailing newline you want in the selected payload. `target_before` is the exact context before the insertion point, so insertion occurs after it. `target_after` is the exact context after the insertion point, so insertion occurs before it. `blockpatch` never inserts extra newlines or spacing between anchors and payload.
+`src_start`, `src_end`, `insert_before`, `insert_after`, `target_before`, and `target_after` are byte-exact and newline-sensitive. Source selection starts at `src_start` and ends after the first following `src_end`; include any leading or trailing newline you want in the selected payload. `insert_after` is exact context before the insertion point. `insert_before` is exact context after the insertion point. The lower-level `target_before` and `target_after` fields are equivalent before/after context fields. `blockpatch` never inserts extra newlines or spacing between anchors and payload.
 
 Insertion:
 
@@ -221,7 +223,7 @@ Insertion:
   "src": "/dev/null",
   "dst": "src/foo.ts",
   "payload": "inserted bytes\n",
-  "target_before": "context before\n"
+  "insert_after": "context before\n"
 }
 ```
 
@@ -288,18 +290,24 @@ type ApplyResult = {
     dst: string
     payload_sha256: string
     payload_bytes: number
+    payload_lines: number
+    payload_hash_verified: true
     source_range: { start: number; end: number } | null
+    source_line_range: { start: number; end: number } | null
     target_range: { start: number; end: number } | null
+    target_line_range: { start: number; end: number } | null
     insert_index: number | null
+    insert_line: number | null
   }>
+  patch_sha256?: string
 }
 ```
 
-`changed` lists paths whose content changed, or would change during `check`, `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `check`, `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes.
+`changed` lists paths whose content changed, or would change during `--dry-run`, `--diff`, and `--explain`. `written` is true only when files were actually replaced by the command; it is false for `--dry-run`, `--diff`, `--explain`, `noop`, and `already_applied`. `affected` lists paths examined by the patch. `noop` is true when the patch validated but produced identical bytes.
 
-`status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the command can prove the requested final state is already present. `strip_components` is present for `check` and `apply` JSON success output and reports the effective `-p` path-stripping count; it defaults to `1`.
+`status` is `applied` for a normal computed move, `noop` for a computed move whose output bytes are identical, and `already_applied` when the command can prove the requested final state is already present. `strip_components`, `mode`, and `validation` are present for `apply` JSON success output; `strip_components` reports the effective `-p` path-stripping count and defaults to `1`.
 
-`patch` is present when `move --diff --json-output` is used. `warnings` is present when a move validates but may surprise a caller, such as an insertion boundary where neither side contains a newline and the bytes will be joined directly. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`.
+`patch_sha256` identifies the reviewed patch bytes for `apply` results. `patch` is present when `move --diff --json-output` is used. `warnings` is present when a move validates but may surprise a caller, such as an insertion boundary where neither side contains a newline and the bytes will be joined directly. In `already_applied` relocation results, `source_range` is `null` because the source block is no longer present. For target-only insertions, `source_range` is `null`. For source-only deletions, `target_range` and `insert_index` are `null`. For path creation/removal, `src` or `dst` is the string `/dev/null`.
 
 With `--json-output`, errors print:
 
@@ -317,6 +325,16 @@ type BlockPatchJsonError = {
     matches_truncated?: boolean
     ranges?: Array<{ start: number; end: number }>
     line_ranges?: Array<{ start: number; end: number }>
+    src_start_matches?: number
+    src_start_matches_truncated?: boolean
+    src_start_ranges?: Array<{ start: number; end: number }>
+    src_start_line_ranges?: Array<{ start: number; end: number }>
+    src_end_matches?: number
+    src_end_matches_truncated?: boolean
+    src_end_ranges?: Array<{ start: number; end: number }>
+    src_end_line_ranges?: Array<{ start: number; end: number }>
+    src_end_matches_after_start?: number
+    src_end_matches_after_start_truncated?: boolean
     source_range?: { start: number; end: number }
     target_range?: { start: number; end: number }
     payload_sha256?: string
@@ -325,7 +343,7 @@ type BlockPatchJsonError = {
 }
 ```
 
-Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. When `matches_truncated` is true, `matches` is a lower bound rather than an exact count. They do not include source snippets, fuzzy suggestions, or repair guidance.
+Ambiguous-match errors include up to the first 10 exact byte ranges for the matched anchors or candidate source ranges, plus matching 1-based inclusive `line_ranges` when the relevant file bytes are available. When `matches_truncated` is true, `matches` is a lower bound rather than an exact count. `source_not_found` errors additionally report whether `src_start` and `src_end` matched independently, including line ranges for each delimiter and how many `src_end` matches occurred after matched `src_start` positions. They do not include source snippets, fuzzy suggestions, or repair guidance.
 
 `partial_applied_duplicate` reports an interrupted cross-file apply state where the source payload is still present and the destination already contains the exact final target state. It includes `source_range`, `target_range`, `payload_sha256`, and `suggested_action: "review_then_remove_source"`. `blockpatch` does not auto-repair this state.
 

@@ -1,17 +1,25 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { TextDecoder } from "node:util";
-import { boundedLineRanges, boundedRanges, fail, matchCountDetails, matchedLocations } from "./errors";
+import {
+  boundedLineRanges,
+  boundedMatchLineRanges,
+  boundedMatchRanges,
+  boundedRanges,
+  fail,
+  matchCountDetails,
+  matchedLocations
+} from "./errors";
 import { readFileChecked, readFileSnapshot } from "./files";
 import {
   applyPatchBytes,
   buildMoveSelection,
-  checkPatchBytesInMemory,
   commitMove,
   findTargetSelection,
   indexesOfLimited,
   moveResultDetails,
   unique,
+  validatePatchBytesInMemory,
   writeAtomic,
   type ByteRange,
   type InMemoryPatchFile,
@@ -30,6 +38,7 @@ interface NormalizedRelocationArgs {
   dst: string;
   targetBefore: Buffer;
   targetAfter: Buffer;
+  targetAnchor: string;
 }
 
 interface NormalizedInsertionArgs {
@@ -39,6 +48,7 @@ interface NormalizedInsertionArgs {
   payload: Buffer;
   targetBefore: Buffer;
   targetAfter: Buffer;
+  targetAnchor: string;
 }
 
 interface NormalizedDeletionArgs {
@@ -82,6 +92,8 @@ const moveArgTypes: Record<keyof MoveBlockArgs, "string" | "boolean"> = {
   payload: "string",
   target_before: "string",
   target_after: "string",
+  insert_before: "string",
+  insert_after: "string",
   expected_payload_sha256: "string",
   mode: "string",
   dry_run: "boolean"
@@ -161,7 +173,9 @@ export async function moveBlock(
         src: normalized.src,
         dst: normalized.dst,
         payloadSha256,
-        selection
+        selection,
+        srcFile: srcOriginal,
+        dstFile: dstOriginal
       })
     ],
     patch,
@@ -250,7 +264,8 @@ function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
       dst: args.dst,
       payload: Buffer.from(args.payload, "utf8"),
       targetBefore: target.before,
-      targetAfter: target.after
+      targetAfter: target.after,
+      targetAnchor: target.anchor
     };
   }
 
@@ -258,9 +273,14 @@ function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
     if (args.payload !== undefined) {
       fail("invalid_move_args", "move to /dev/null selects payload from src_start/src_end", { field: "payload" });
     }
-    if (args.target_before !== undefined || args.target_after !== undefined) {
+    if (
+      args.target_before !== undefined ||
+      args.target_after !== undefined ||
+      args.insert_before !== undefined ||
+      args.insert_after !== undefined
+    ) {
       fail("invalid_move_args", "move to /dev/null must not include target anchors", {
-        field: args.target_before !== undefined ? "target_before" : "target_after"
+        field: targetAnchorField(args)
       });
     }
     return {
@@ -285,7 +305,8 @@ function normalizeArgs(args: MoveBlockArgs): NormalizedMoveBlockArgs {
     srcEnd: requiredBuffer(args.src_end, "src_end"),
     dst,
     targetBefore: target.before,
-    targetAfter: target.after
+    targetAfter: target.after,
+    targetAnchor: target.anchor
   };
 }
 
@@ -342,29 +363,68 @@ function rejectSourceSelectionArgs(args: MoveBlockArgs, message: string): void {
 }
 
 function rejectTargetAnchorArgs(args: MoveBlockArgs, message: string): void {
-  if (args.target_before !== undefined || args.target_after !== undefined) {
+  if (
+    args.target_before !== undefined ||
+    args.target_after !== undefined ||
+    args.insert_before !== undefined ||
+    args.insert_after !== undefined
+  ) {
     fail("invalid_move_args", message, {
-      field: args.target_before !== undefined ? "target_before" : "target_after"
+      field: targetAnchorField(args)
     });
   }
 }
 
-function normalizeTargetArgs(args: MoveBlockArgs): { before: Buffer; after: Buffer } {
-  const hasTargetBefore = args.target_before !== undefined;
-  const hasTargetAfter = args.target_after !== undefined;
+function normalizeTargetArgs(args: MoveBlockArgs): { before: Buffer; after: Buffer; anchor: string } {
+  if (args.target_before !== undefined && args.insert_after !== undefined) {
+    fail("invalid_move_args", "move cannot combine target_before and insert_after", { field: "insert_after" });
+  }
+  if (args.target_after !== undefined && args.insert_before !== undefined) {
+    fail("invalid_move_args", "move cannot combine target_after and insert_before", { field: "insert_before" });
+  }
+
+  const hasTargetBefore = args.target_before !== undefined || args.insert_after !== undefined;
+  const hasTargetAfter = args.target_after !== undefined || args.insert_before !== undefined;
 
   if (!hasTargetBefore && !hasTargetAfter) {
-    fail("invalid_move_args", "move requires target_before or target_after", { field: "target_before" });
+    fail("invalid_move_args", "move requires target_before, target_after, insert_before, or insert_after", {
+      field: "target_before"
+    });
   }
 
-  const targetBefore = Buffer.from(args.target_before ?? "", "utf8");
-  const targetAfter = Buffer.from(args.target_after ?? "", "utf8");
+  const targetBefore = Buffer.from(args.target_before ?? args.insert_after ?? "", "utf8");
+  const targetAfter = Buffer.from(args.target_after ?? args.insert_before ?? "", "utf8");
 
   if (targetBefore.length === 0 && targetAfter.length === 0) {
-    fail("invalid_move_args", "move requires non-empty target context", { field: "target_before" });
+    fail("invalid_move_args", "move requires non-empty target context", { field: targetAnchorField(args) });
   }
 
-  return { before: targetBefore, after: targetAfter };
+  return { before: targetBefore, after: targetAfter, anchor: targetAnchorNameFromArgs(args) };
+}
+
+function targetAnchorField(args: MoveBlockArgs): keyof MoveBlockArgs {
+  if (args.target_before !== undefined) {
+    return "target_before";
+  }
+  if (args.target_after !== undefined) {
+    return "target_after";
+  }
+  if (args.insert_before !== undefined) {
+    return "insert_before";
+  }
+  return "insert_after";
+}
+
+function targetAnchorNameFromArgs(args: MoveBlockArgs): string {
+  const before =
+    args.target_before !== undefined ? "target_before" : args.insert_after !== undefined ? "insert_after" : undefined;
+  const after =
+    args.target_after !== undefined ? "target_after" : args.insert_before !== undefined ? "insert_before" : undefined;
+
+  if (before !== undefined && after !== undefined) {
+    return `${before}+${after}`;
+  }
+  return before ?? after ?? "target_before";
 }
 
 function requiredBuffer(value: string | undefined, field: "src_start" | "src_end"): Buffer {
@@ -446,9 +506,14 @@ async function insertPayload(
           dst: args.dst,
           payload_sha256: payloadSha256,
           payload_bytes: args.payload.length,
+          payload_lines: countLines(args.payload),
+          payload_hash_verified: true,
           source_range: null,
+          source_line_range: null,
           target_range: alreadyApplied.range,
-          insert_index: alreadyApplied.insertIndex
+          target_line_range: byteRangeToLineRange(original, alreadyApplied.range),
+          insert_index: alreadyApplied.insertIndex,
+          insert_line: lineNumberAt(original, alreadyApplied.insertIndex)
         }
       ],
       patch: renderedPatch
@@ -488,9 +553,14 @@ async function insertPayload(
         dst: args.dst,
         payload_sha256: payloadSha256,
         payload_bytes: args.payload.length,
+        payload_lines: countLines(args.payload),
+        payload_hash_verified: true,
         source_range: null,
+        source_line_range: null,
         target_range: target.range,
-        insert_index: target.insertIndex
+        target_line_range: byteRangeToLineRange(original, target.range),
+        insert_index: target.insertIndex,
+        insert_line: lineNumberAt(original, target.insertIndex)
       }
     ],
     patch: renderedPatch,
@@ -622,9 +692,14 @@ async function deletePayload(
         dst: devNull,
         payload_sha256: payloadSha256,
         payload_bytes: payload.length,
+        payload_lines: countLines(payload),
+        payload_hash_verified: true,
         source_range: source,
+        source_line_range: byteRangeToLineRange(original, source),
         target_range: null,
-        insert_index: null
+        target_line_range: null,
+        insert_index: null,
+        insert_line: null
       }
     ],
     patch: renderedPatch
@@ -636,11 +711,12 @@ function findSource(file: Buffer, args: NormalizedRelocationArgs | NormalizedDel
   const ranges = result.ranges;
 
   if (ranges.length === 0) {
-    fail("source_not_found", `Source delimiters were not found in ${args.src}`, {
+    fail("source_not_found", sourceNotFoundMessage(file, args), {
       path: args.src,
       phase: "source",
       anchor: "src_start/src_end",
-      matches: 0
+      matches: 0,
+      ...sourceNotFoundDetails(file, args)
     });
   }
   if (ranges.length > 1 || result.truncated) {
@@ -655,6 +731,78 @@ function findSource(file: Buffer, args: NormalizedRelocationArgs | NormalizedDel
   }
 
   return ranges[0];
+}
+
+function sourceNotFoundMessage(file: Buffer, args: NormalizedRelocationArgs | NormalizedDeletionArgs): string {
+  const startMatches = indexesOfLimited(file, args.srcStart);
+  if (startMatches.matches.length === 0) {
+    const endMatches = indexesOfLimited(file, args.srcEnd);
+    return `Source delimiters were not found in ${args.src}; src_start matched 0 locations and src_end matched ${matchPhrase(
+      endMatches.matches.length,
+      endMatches.truncated
+    )}`;
+  }
+
+  const endAfterStart = countEndMatchesAfterStarts(file, args.srcStart, args.srcEnd, startMatches.matches);
+  return `Source delimiters were not found in ${args.src}; src_start matched ${matchPhrase(
+    startMatches.matches.length,
+    startMatches.truncated
+  )}, but src_end matched ${matchPhrase(endAfterStart.matches, endAfterStart.truncated)} after those starts`;
+}
+
+function sourceNotFoundDetails(
+  file: Buffer,
+  args: NormalizedRelocationArgs | NormalizedDeletionArgs
+): Record<string, unknown> {
+  const startMatches = indexesOfLimited(file, args.srcStart);
+  const endMatches = indexesOfLimited(file, args.srcEnd);
+  const endAfterStart = countEndMatchesAfterStarts(file, args.srcStart, args.srcEnd, startMatches.matches);
+
+  return {
+    src_start_matches: startMatches.matches.length,
+    ...(startMatches.truncated ? { src_start_matches_truncated: true } : {}),
+    src_start_ranges: boundedMatchRanges(startMatches.matches, args.srcStart.length),
+    src_start_line_ranges: boundedMatchLineRanges(file, startMatches.matches, args.srcStart.length),
+    src_end_matches: endMatches.matches.length,
+    ...(endMatches.truncated ? { src_end_matches_truncated: true } : {}),
+    src_end_ranges: boundedMatchRanges(endMatches.matches, args.srcEnd.length),
+    src_end_line_ranges: boundedMatchLineRanges(file, endMatches.matches, args.srcEnd.length),
+    src_end_matches_after_start: endAfterStart.matches,
+    ...(endAfterStart.truncated ? { src_end_matches_after_start_truncated: true } : {}),
+    suggested_action:
+      startMatches.matches.length === 0
+        ? "tighten src_start to exact bytes present in the source file"
+        : "tighten src_end so it appears after the selected src_start"
+  };
+}
+
+function countEndMatchesAfterStarts(
+  file: Buffer,
+  startNeedle: Buffer,
+  endNeedle: Buffer,
+  starts: readonly number[],
+  limit = 11
+): { matches: number; truncated: boolean } {
+  const maxMatches = normalizedLimit(limit);
+  let matches = 0;
+
+  for (const start of starts) {
+    const searchFrom = start + startNeedle.length;
+    let endStart = file.indexOf(endNeedle, searchFrom);
+    while (endStart !== -1) {
+      if (matches >= maxMatches) {
+        return { matches, truncated: true };
+      }
+      matches += 1;
+      endStart = file.indexOf(endNeedle, endStart + 1);
+    }
+  }
+
+  return { matches, truncated: false };
+}
+
+function matchPhrase(count: number, truncated: boolean): string {
+  return `${truncated ? "at least " : ""}${count} ${count === 1 ? "location" : "locations"}`;
 }
 
 function findDelimitedRanges(file: Buffer, startNeedle: Buffer, endNeedle: Buffer, limit = 11): LimitedRanges {
@@ -688,10 +836,7 @@ function normalizedLimit(limit: number): number {
 }
 
 function targetAnchorName(args: NormalizedRelocationArgs | NormalizedInsertionArgs): string {
-  if (args.targetBefore.length > 0 && args.targetAfter.length > 0) {
-    return "target_before+target_after";
-  }
-  return args.targetBefore.length > 0 ? "target_before" : "target_after";
+  return args.targetAnchor;
 }
 
 function samePatchPath(left: string, right: string): boolean {
@@ -705,7 +850,7 @@ async function selfCheckRenderedPatch(
   if (patch === undefined) {
     return;
   }
-  checkPatchBytesInMemory(Buffer.from(patch, "utf8"), files);
+  validatePatchBytesInMemory(Buffer.from(patch, "utf8"), files);
 }
 
 function pairedSelfCheckFiles(
@@ -924,12 +1069,23 @@ function renderFileRemovalPatch(
 
 function lineNumberAt(file: Buffer, byteIndex: number): number {
   let line = 1;
-  for (let index = 0; index < byteIndex; index += 1) {
+  const end = Math.min(byteIndex, file.length);
+  for (let index = 0; index < end; index += 1) {
     if (file[index] === 0x0a) {
       line += 1;
     }
   }
   return line;
+}
+
+function byteRangeToLineRange(file: Buffer, range: ByteRange): { start: number; end: number } {
+  const start = Math.min(Math.max(range.start, 0), file.length);
+  const end = Math.min(Math.max(range.end, start), file.length);
+  const endByte = end > start ? end - 1 : start;
+  return {
+    start: lineNumberAt(file, start),
+    end: lineNumberAt(file, endByte)
+  };
 }
 
 function countLines(bytes: Buffer): number {

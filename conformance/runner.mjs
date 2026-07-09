@@ -80,7 +80,7 @@ async function runCase(caseName) {
   const expect = caseDefinition.expect ?? "pass";
 
   if (expect === "pass") {
-    await expectSuccess(caseName, "check", [patchPath, "--cwd", workRoot]);
+    await expectSuccess(caseName, "dry-run", [patchPath, "--cwd", workRoot, "--dry-run"]);
     await expectTree(caseName, workRoot, initialFiles, []);
     await expectSuccess(caseName, "apply", [patchPath, "--cwd", workRoot]);
     await expectTree(caseName, workRoot, expectedFiles, expectedAbsent);
@@ -92,7 +92,7 @@ async function runCase(caseName) {
   }
 
   if (expect === "fail") {
-    await expectFailure(caseName, "check", [patchPath, "--cwd", workRoot], caseDefinition.error_code);
+    await expectFailure(caseName, "dry-run", [patchPath, "--cwd", workRoot, "--dry-run"], caseDefinition.error_code);
     await expectTree(caseName, workRoot, initialFiles, []);
     await expectFailure(caseName, "apply", [patchPath, "--cwd", workRoot], caseDefinition.error_code);
     await expectTree(caseName, workRoot, initialFiles, []);
@@ -128,7 +128,7 @@ async function expectFailure(caseName, label, args, errorCode) {
 }
 
 function commandArgs(label, args) {
-  return [label === "check" ? "check" : "apply", ...args];
+  return ["apply", ...args];
 }
 
 function runBlockpatch(args) {
