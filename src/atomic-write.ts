@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 import { BlockPatchError, fail } from "./errors";
 import { assertRegularFile, failFileSystem, readFileSnapshot } from "./files";
 import type { Stats } from "node:fs";
@@ -240,10 +240,17 @@ async function ensureParentDirectory(directory: string): Promise<CreatedDirector
 
 async function assertSafeOutputParentDirectory(dir: string, outputPath: string): Promise<void> {
   let current = resolve(dir);
-  const root = resolve(current.split(sep)[0] || sep);
+  const root = parse(current).root;
   while (true) {
     const info = await lstat(current);
     if (info.isSymbolicLink()) {
+      // macOS temp paths commonly begin under /var, which is a top-level
+      // platform symlink to /private/var. Operation-path resolution already
+      // rejects symlinks inside the target tree; this guard catches deeper
+      // output parents without rejecting OS-level path aliases.
+      if (dirname(current) === root) {
+        return;
+      }
       fail("symlink_path", `Output path must not contain symbolic links: ${outputPath}`, {
         path: outputPath,
         phase: "write"

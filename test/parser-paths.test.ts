@@ -290,7 +290,7 @@ describe("format hardening", () => {
     );
 
     await expect(applyPatchFile("patch.blockpatch", { cwd })).rejects.toThrow(
-      "must not contain empty path segments"
+      process.platform === "win32" ? "must use POSIX-style / separators" : "must not contain empty path segments"
     );
     expect(await readFile(absolutePath, "utf8")).toBe("safe\nmove me\nomega\nanchor\n");
   });
