@@ -136,7 +136,7 @@ function hasSystemPatch(): boolean {
       );
 
       const probe = Bun.spawnSync({
-        cmd: ["patch", "--fuzz=0", "-p1", "--batch", "-i", "probe.blockpatch"],
+        cmd: ["patch", "--fuzz=0", "-p1", "--batch", "-E", "-i", "probe.blockpatch"],
         cwd,
         stdout: "pipe",
         stderr: "pipe"
@@ -193,7 +193,7 @@ export async function expectSystemPatchApplies(cwd: string, patchText: string | 
   await writeFile(join(cwd, "generated.blockpatch"), patchText);
 
   const proc = Bun.spawn({
-    cmd: ["patch", "--fuzz=0", "-p1", "--batch", "-i", "generated.blockpatch"],
+    cmd: ["patch", "--fuzz=0", "-p1", "--batch", "-E", "-i", "generated.blockpatch"],
     cwd,
     stdout: "pipe",
     stderr: "pipe"

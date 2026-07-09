@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
 const smokeRoot = await mkdtemp(join(tmpdir(), "blockpatch-packed-cli-"));
 const packDir = join(smokeRoot, "pack");
 const installRoot = join(smokeRoot, "install");
@@ -50,7 +51,7 @@ try {
 }
 
 async function packPackage() {
-  const stdout = run("npm", ["pack", "--json", "--pack-destination", packDir], {
+  const stdout = run(npmCommand, ["pack", "--json", "--pack-destination", packDir], {
     cwd: repoRoot,
     label: "npm pack"
   });
@@ -75,7 +76,7 @@ async function packPackage() {
 }
 
 async function installPackage(tarballPath) {
-  run("npm", ["install", "--global", "--prefix", installRoot, tarballPath], {
+  run(npmCommand, ["install", "--global", "--prefix", installRoot, tarballPath], {
     cwd: repoRoot,
     label: "npm install packed tarball"
   });
