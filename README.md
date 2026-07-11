@@ -134,6 +134,21 @@ Use `move --json - --diff --output patch.blockpatch --dry-run` when you want a r
 
 `apply` also accepts blockpatch content from stdin, either positionally or with `--patch -`, for workflows that do not need to keep a temporary patch file.
 
+## Pi coding harness
+
+The package includes a Pi extension that registers `blockpatch` beside Pi's
+native `read`, `edit`, and `write` tools. It exposes structured `plan` and
+`apply` actions, stores content-addressed review artifacts, and participates in
+Pi's shared file-mutation queue.
+
+```sh
+$ pi install npm:blockpatch
+$ pi --tools read,edit,write,blockpatch
+```
+
+For local development and implementation details, see
+[the Pi integration guide](integrations/pi/README.md).
+
 When using `--cwd`, operation paths inside patches and move JSON are relative to `--cwd`; input patch and move JSON filenames are normal CLI paths, relative to your shell working directory unless absolute. For `--cwd /home/alan/dev/test1/shooter`, use `src/game/file.ts`, not `dev/test1/shooter/src/game/file.ts`.
 
 ## Docs

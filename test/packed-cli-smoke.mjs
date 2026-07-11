@@ -13,6 +13,10 @@ const smokeRoot = await mkdtemp(join(tmpdir(), "blockpatch-packed-cli-"));
 const packDir = join(smokeRoot, "pack");
 const installRoot = join(smokeRoot, "install");
 const workRoot = join(smokeRoot, "work");
+const installedPackageRoot =
+  process.platform === "win32"
+    ? join(installRoot, "node_modules", "blockpatch")
+    : join(installRoot, "lib", "node_modules", "blockpatch");
 const binPath =
   process.platform === "win32"
     ? join(installRoot, "blockpatch.cmd")
@@ -44,6 +48,7 @@ try {
   const tarballPath = await packPackage();
   await installPackage(tarballPath);
   await assertInstalledBin();
+  await assertInstalledPiExtension();
   await smokeVersion();
   await smokeCheckAndApply();
   await smokeConformance();
@@ -71,6 +76,10 @@ async function packPackage() {
     packed.files.some((file) => file.path === "conformance/runner.mjs" && isExecutablePackEntry(file)),
     "packed conformance runner must exist and be executable"
   );
+  assert(
+    packed.files.some((file) => file.path === "dist/pi/index.js"),
+    "packed Pi extension must exist"
+  );
   const tarballPath = join(packDir, packed.filename);
   await access(tarballPath, constants.R_OK);
   console.log(`ok: npm pack ${packed.filename}`);
@@ -94,6 +103,13 @@ async function assertInstalledBin() {
   await access(binPath, process.platform === "win32" ? constants.F_OK : constants.X_OK);
   await access(conformanceBinPath, process.platform === "win32" ? constants.F_OK : constants.X_OK);
   console.log("ok: installed blockpatch bins");
+}
+
+async function assertInstalledPiExtension() {
+  const installedManifest = JSON.parse(await readFile(join(installedPackageRoot, "package.json"), "utf8"));
+  assertEqual(installedManifest.pi?.extensions, ["./dist/pi/index.js"], "installed Pi extension manifest");
+  await access(join(installedPackageRoot, "dist", "pi", "index.js"), constants.R_OK);
+  console.log("ok: installed Pi extension");
 }
 
 async function smokeVersion() {

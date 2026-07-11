@@ -19,8 +19,14 @@
     "refactor",
     "codemod",
     "text",
-    "agent"
+    "agent",
+    "pi-package"
   ],
+  "pi": {
+    "extensions": [
+      "./dist/pi/index.js"
+    ]
+  },
   "bin": {
     "blockpatch": "dist/cli.js",
     "blockpatch-conformance": "conformance/runner.mjs"
@@ -29,6 +35,7 @@
     "dist",
     "docs",
     "examples",
+    "integrations",
     "conformance",
     "README.md",
     "CONTRIBUTING.md",
@@ -37,7 +44,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && bun build ./src/cli.ts --target=node --outdir=dist",
+    "experiment": "node experiment/harness.mjs",
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && bun build ./src/cli.ts --target=node --outdir=dist && bun build ./integrations/pi/index.ts --target=node --outdir=dist/pi --external @earendil-works/pi-coding-agent --external typebox",
     "smoke:dist": "node test/built-cli-smoke.mjs",
     "smoke:pack": "node test/packed-cli-smoke.mjs",
     "conformance": "node conformance/runner.mjs node dist/cli.js",
@@ -46,9 +54,23 @@
     "publish:dry": "npm publish --dry-run"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.4",
     "@types/bun": "^1.3.14",
     "@types/node": "^20",
+    "typebox": "^1.1.38",
     "typescript": "^5.8.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=20"

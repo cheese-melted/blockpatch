@@ -57,6 +57,8 @@ export interface BlockPatchErrorDetails {
   source_range?: BlockPatchErrorRange;
   target_range?: BlockPatchErrorRange;
   payload_sha256?: string;
+  expected_sha256?: string;
+  actual_sha256?: string;
   suggested_action?: string;
 }
 
