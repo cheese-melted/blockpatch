@@ -1,0 +1,12 @@
+{
+  "id": "git-trails-split-views",
+  "description": "Split git-trails content and identity views into focused modules",
+  "repository": "../git-trails",
+  "base": "278e96f^",
+  "reference": "278e96f",
+  "setup_command": "bun install --frozen-lockfile",
+  "test_command": "bun test && bun run build",
+  "evaluation_command": "node {experiment_root}/evaluators/git-trails-split-views.mjs {workspace}",
+  "timeout_seconds": 900,
+  "prompt": "Refactor the view layer so content rendering and identity rendering have focused modules instead of sharing the broad ops module. Keep the compact content view. Replace the single identity-summary command with directional identity-from and identity-to views that explain where old file content moved and where new file content came from. Update the CLI, public exports, types, tests, schema, and documentation as needed. Preserve the canonical digest and verification behavior. Complete the implementation and run the relevant tests."
+}

@@ -1,0 +1,12 @@
+{
+  "id": "shooter-move-csv-pi",
+  "description": "Pi harness: move Shooter CSV serialization into its existing telemetry CSV module",
+  "repository": "../shooter",
+  "base": "50b7c37^",
+  "reference": "50b7c37",
+  "setup_command": "npm ci --ignore-scripts",
+  "test_command": "npm run check:types && npx vitest run tests/unit/telemetry.test.ts",
+  "evaluation_command": "node {experiment_root}/evaluators/shooter-move-csv.mjs {workspace}",
+  "timeout_seconds": 1200,
+  "prompt": "Move CSV serialization responsibility out of src/game/telemetry/index.ts and into the existing src/game/telemetry/csv.ts module. Relocate summariesToCsv and its private summaryToCsvRow helper byte-for-byte, without reformatting or regenerating their implementations. Preserve summariesToCsv's existing public import path by re-exporting it from the telemetry index, and adjust imports only as needed. Keep the change limited to those two source files. Run the TypeScript checks and the focused telemetry unit test."
+}
